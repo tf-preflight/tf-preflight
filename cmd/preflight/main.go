@@ -25,7 +25,7 @@ var (
 	version           = "dev"
 	gitCommit         = "dirty"
 	buildDate         = "unknown"
-	azureQueryBackend = "Azure REST (management.azure.com)"
+	azureQueryBackend = "Azure REST (management.azure.com + vault.azure.net)"
 	hclLibVersion     = "github.com/hashicorp/hcl/v2@v2.23.0"
 	ctyLibVersion     = "github.com/zclconf/go-cty@v1.15.1"
 	goVersion         = "go1.21"
@@ -169,7 +169,9 @@ func runScan(opts model.CommandOptions) error {
 	}
 
 	client := azure.NewAzureClient(token)
-	findings, err := azure.RunChecks(ctx, candidates, client, subscriptionID, opts.SeverityThreshold, progress)
+	findings, err := azure.RunChecks(ctx, candidates, client, subscriptionID, opts.SeverityThreshold, progress, func(resource string) (string, error) {
+		return resolveAzureTokenForResource(resource, opts.Verbose)
+	})
 	if err != nil {
 		return err
 	}
@@ -318,11 +320,11 @@ func execCommand(ctx context.Context, dir string, verbose bool, name string, arg
 	return nil
 }
 
-func azureTokenFromCLI(verbose bool) (string, error) {
+func azureTokenFromCLI(resource string, verbose bool) (string, error) {
 	if verbose {
-		fmt.Println("Obtaining token from azure cli: az account get-access-token")
+		fmt.Printf("Obtaining token from azure cli: az account get-access-token --resource %s\n", resource)
 	}
-	cmd := exec.Command("az", "account", "get-access-token", "--resource", "https://management.azure.com", "--query", "accessToken", "-o", "tsv")
+	cmd := exec.Command("az", "account", "get-access-token", "--resource", resource, "--query", "accessToken", "-o", "tsv")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -331,7 +333,11 @@ func azureTokenFromCLI(verbose bool) (string, error) {
 }
 
 func resolveAzureToken(verbose bool) (string, error) {
-	for _, envVar := range []string{"AZURE_ACCESS_TOKEN", "ARM_ACCESS_TOKEN", "AZURE_CLI_TOKEN"} {
+	return resolveAzureTokenForResource(azure.ResourceManagerAudience, verbose)
+}
+
+func resolveAzureTokenForResource(resource string, verbose bool) (string, error) {
+	for _, envVar := range tokenEnvVarsForResource(resource) {
 		if token := strings.TrimSpace(os.Getenv(envVar)); token != "" {
 			if verbose {
 				fmt.Printf("Using token from %s\n", envVar)
@@ -339,7 +345,16 @@ func resolveAzureToken(verbose bool) (string, error) {
 			return token, nil
 		}
 	}
-	return azureTokenFromCLI(verbose)
+	return azureTokenFromCLI(resource, verbose)
+}
+
+func tokenEnvVarsForResource(resource string) []string {
+	switch strings.TrimSpace(resource) {
+	case azure.KeyVaultAudience:
+		return []string{"AZURE_KEYVAULT_ACCESS_TOKEN", "ARM_KEYVAULT_ACCESS_TOKEN", "AZURE_KEYVAULT_CLI_TOKEN"}
+	default:
+		return []string{"AZURE_ACCESS_TOKEN", "ARM_ACCESS_TOKEN", "AZURE_CLI_TOKEN"}
+	}
 }
 
 func printVersion() {

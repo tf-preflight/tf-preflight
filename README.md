@@ -142,8 +142,15 @@ Recommended workflow:
 3. Quota checks from usages endpoints when mappings are available
 4. Safe existence probes for planned names on create/update
    - backend probe failures are surfaced explicitly as errors
-5. Unknown resource types and unresolved/static-unknown locations are reported as warnings
-6. Local module imports are validated:
+5. Azure SQL capability checks for `Microsoft.Sql`
+   - validates region provisioning status for SQL server/database deployment
+   - validates SQL database `sku_name` availability in the effective region before apply
+6. Key Vault secret access checks for `azurerm_key_vault_secret`
+   - validates Key Vault data-plane read access (`secrets/get`)
+   - validates Key Vault data-plane write access (`secrets/set`) with a non-mutating invalid payload probe
+   - explicit `403` access denial is surfaced as a blocker before apply
+7. Unknown resource types and unresolved/static-unknown locations are reported as warnings
+8. Local module imports are validated:
    - verifies local module source paths exist
    - verifies local module directories contain `.tf` files
    - flags dynamic/unresolved module sources
@@ -180,7 +187,7 @@ Recommended workflow:
 
 | Finding type | Trigger | Severity | Threshold fail impact |
 |---|---|---|---|
-| `error` | invalid location / provider not registered / quota exceeded / existence probe backend failure | hard | always fail |
+| `error` | invalid location / provider not registered / quota exceeded / SQL provisioning restricted / SQL SKU unavailable / Key Vault secret access denied / existence probe backend failure | hard | always fail |
 | `warn` | unsupported type / location unknown / resource exists / quota endpoint unavailable | warning | fail only with `--severity-threshold warn` |
 | `none` | all checks clean | pass | pass |
 
@@ -191,15 +198,26 @@ This tool uses direct Azure REST calls (not the Terraform AzureRM provider SDK).
 - `/subscriptions/{id}/locations`
 - `/subscriptions/{id}/providers/{namespace}`
 - namespace usage endpoints used for quota checks
+- `Microsoft.Sql` location capabilities endpoints for SQL provisioning/SKU validation
+- Key Vault management `GET {vaultId}` plus Key Vault data-plane secret probes for secret access validation
 
 Token resolution order:
+
+Management plane (`https://management.azure.com`):
 
 1. `AZURE_ACCESS_TOKEN`
 2. `ARM_ACCESS_TOKEN`
 3. `AZURE_CLI_TOKEN`
 4. `az account get-access-token --resource https://management.azure.com...`
 
-So yes: if you are authenticated with `az login`, CLI fallback uses that same session for authorization.
+Key Vault data plane (`https://vault.azure.net`), when `azurerm_key_vault_secret` is checked:
+
+1. `AZURE_KEYVAULT_ACCESS_TOKEN`
+2. `ARM_KEYVAULT_ACCESS_TOKEN`
+3. `AZURE_KEYVAULT_CLI_TOKEN`
+4. `az account get-access-token --resource https://vault.azure.net...`
+
+So yes: if you are authenticated with `az login`, CLI fallback uses that same session for authorization. Key Vault secret preflight requires a vault-scoped token; management-scoped tokens are not reused for that probe.
 
 ## CLI output and progress
 
@@ -215,7 +233,7 @@ So yes: if you are authenticated with `az login`, CLI fallback uses that same se
 ## Version and SDK information
 
 - `tf-preflight version` prints build metadata and stack dependencies:
-  - Azure query transport: direct `management.azure.com` REST
+  - Azure query transport: direct `management.azure.com` and `vault.azure.net` REST
   - HCL parser: `github.com/hashicorp/hcl/v2@v2.23.0`
   - Terraform value model: `github.com/zclconf/go-cty@v1.15.1`
 

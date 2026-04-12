@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add Azure SQL preflight capability validation to catch region-restricted `Microsoft.Sql` provisioning and unavailable SQL database `sku_name` combinations before `terraform apply`.
+- Add Key Vault secret preflight access validation for `azurerm_key_vault_secret`, with explicit blocker findings for missing `secrets/get` and `secrets/set` permissions.
+- Add audience-specific Azure token resolution so Key Vault secret validation uses `vault.azure.net` tokens without reusing management-scoped tokens.
 - Harden the public contract: executable preferred wrapper, usable `scan --help` / `reconcile --help`, explicit Terraform plan JSON validation, shared Azure subscription fallback, and surfaced existence-probe backend failures.
 - Add CI smoke coverage for binary build, wrapper execution, and local-clone installer execution.
 - Add `tf-preflight reconcile` as a read-only import-gap detection stage before `scan`, with exact `terraform import` recommendations for supported Azure resource types.

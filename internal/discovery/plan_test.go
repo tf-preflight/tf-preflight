@@ -315,6 +315,111 @@ func TestCandidatesFromPlanParsesTrafficManagerEndpointProfileID(t *testing.T) {
 	}
 }
 
+func TestCandidatesFromPlanParsesSQLAndKeyVaultFields(t *testing.T) {
+	cands, err := CandidatesFromPlan(planBlob(t, []map[string]any{
+		{
+			"address": "azurerm_mssql_database.db",
+			"type":    "azurerm_mssql_database",
+			"name":    "db",
+			"mode":    "managed",
+			"change": map[string]any{
+				"actions": []string{"create"},
+				"after": map[string]any{
+					"name":      "db-01",
+					"server_id": "/subscriptions/sub-123/resourceGroups/rg-db/providers/Microsoft.Sql/servers/sql-01",
+					"sku_name":  "GP_S_Gen5_2",
+				},
+				"after_unknown": map[string]any{},
+			},
+		},
+		{
+			"address": "azurerm_key_vault_secret.secret",
+			"type":    "azurerm_key_vault_secret",
+			"name":    "secret",
+			"mode":    "managed",
+			"change": map[string]any{
+				"actions": []string{"create"},
+				"after": map[string]any{
+					"name":         "app-secret",
+					"key_vault_id": "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app",
+				},
+				"after_unknown": map[string]any{},
+			},
+		},
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(cands))
+	}
+	if got := cands[0].ServerID; got != "/subscriptions/sub-123/resourceGroups/rg-db/providers/Microsoft.Sql/servers/sql-01" {
+		t.Fatalf("expected parsed server ID, got %s", got)
+	}
+	if got := cands[0].Sku; got != "GP_S_Gen5_2" {
+		t.Fatalf("expected parsed sku_name, got %s", got)
+	}
+	if got := cands[1].KeyVaultID; got != "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app" {
+		t.Fatalf("expected parsed key vault ID, got %s", got)
+	}
+}
+
+func TestCandidatesFromPlanMergesKeyVaultIDFromParsedHCL(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`
+provider "azurerm" {
+  subscription_id = "sub-123"
+  features {}
+}
+
+resource "azurerm_key_vault" "kv" {
+  name                = "kv-app"
+  location            = "westeurope"
+  resource_group_name = "rg-sec"
+  tenant_id           = "00000000-0000-0000-0000-000000000000"
+  sku_name            = "standard"
+}
+
+resource "azurerm_key_vault_secret" "secret" {
+  name         = "app-secret"
+  key_vault_id = azurerm_key_vault.kv.id
+  value        = "super-secret"
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hcl, err := ParseDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cands, err := CandidatesFromPlan(planBlob(t, []map[string]any{
+		{
+			"address": "azurerm_key_vault_secret.secret",
+			"type":    "azurerm_key_vault_secret",
+			"name":    "secret",
+			"mode":    "managed",
+			"change": map[string]any{
+				"actions": []string{"create"},
+				"after": map[string]any{
+					"name": "app-secret",
+				},
+				"after_unknown": map[string]any{},
+			},
+		},
+	}), hcl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cands[0].Source; got != "merged" {
+		t.Fatalf("expected merged source, got %s", got)
+	}
+	if got := cands[0].KeyVaultID; got != "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app" {
+		t.Fatalf("expected merged key vault ID, got %s", got)
+	}
+}
+
 func TestCandidatesFromPlanMergesForEachModuleInstanceFromParsedHCL(t *testing.T) {
 	dir := t.TempDir()
 	moduleDir := filepath.Join(dir, "modules", "web")

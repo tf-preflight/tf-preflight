@@ -2,6 +2,7 @@ package azure
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -246,7 +247,7 @@ func TestRunChecks_SurfacesExistenceProbeFailures(t *testing.T) {
 			Name:           "rg-test",
 			Location:       "westeurope",
 		},
-	}, client, "sub-123", "error", nil)
+	}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -264,7 +265,7 @@ func TestRunChecks_SurfacesExistenceProbeFailures(t *testing.T) {
 }
 
 func TestRunChecks_ReturnsErrorWhenTokenMissing(t *testing.T) {
-	_, err := RunChecks(context.Background(), nil, NewAzureClient(""), "sub-123", "error", nil)
+	_, err := RunChecks(context.Background(), nil, NewAzureClient(""), "sub-123", "error", nil, nil)
 	if err == nil {
 		t.Fatal("expected missing token error")
 	}
@@ -276,7 +277,7 @@ func TestRunChecks_ReturnsErrorWhenTokenMissing(t *testing.T) {
 func TestRunChecks_ReturnsErrorWhenSubscriptionCannotBeResolved(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
-	_, err := RunChecks(context.Background(), nil, NewAzureClient("token"), "", "error", nil)
+	_, err := RunChecks(context.Background(), nil, NewAzureClient("token"), "", "error", nil, nil)
 	if err == nil {
 		t.Fatal("expected subscription resolution error")
 	}
@@ -325,7 +326,7 @@ func TestRunChecks_SurfacesProviderLookupFailure(t *testing.T) {
 		SubscriptionID: "sub-123",
 		Name:           "rg-test",
 		Location:       "westeurope",
-	}}, client, "sub-123", "error", nil)
+	}}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -355,7 +356,7 @@ func TestRunChecks_SurfacesLocationLookupFailure(t *testing.T) {
 		SubscriptionID: "sub-123",
 		Name:           "rg-test",
 		Location:       "westeurope",
-	}}, client, "sub-123", "error", nil)
+	}}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -393,7 +394,7 @@ func TestRunChecks_SurfacesQuotaLookupFailure(t *testing.T) {
 		ResourceGroup:  "rg-app",
 		Name:           "asp-01",
 		Location:       "westeurope",
-	}}, client, "sub-123", "error", nil)
+	}}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -406,6 +407,8 @@ func TestRunChecks_SurfacesUnsupportedExistenceMapping(t *testing.T) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
 			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/capabilities"):
+			writeJSON(w, `{"name":"West Europe","status":"Available","supportedServerVersions":[]}`)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/usages"):
 			writeJSON(w, `{"value":[{"name":{"value":"databases"},"currentValue":1,"limit":10}]}`)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql"):
@@ -424,7 +427,7 @@ func TestRunChecks_SurfacesUnsupportedExistenceMapping(t *testing.T) {
 		ResourceGroup:  "rg-db",
 		Name:           "db-01",
 		Location:       "westeurope",
-	}}, client, "sub-123", "error", nil)
+	}}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -454,7 +457,7 @@ func TestRunChecks_SurfacesIncompleteExistenceMapping(t *testing.T) {
 		SubscriptionID: "sub-123",
 		Name:           "asp-01",
 		Location:       "westeurope",
-	}}, client, "sub-123", "error", nil)
+	}}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -499,7 +502,7 @@ func TestRunChecks_SupportsVirtualNetworkAndSubnet(t *testing.T) {
 			VirtualNetwork: "vnet-app",
 			Name:           "subnet-app",
 		},
-	}, client, "sub-123", "error", nil)
+	}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -530,7 +533,7 @@ func TestRunChecks_SupportsTrafficManagerProfileWithoutLocation(t *testing.T) {
 		SubscriptionID: "sub-123",
 		ResourceGroup:  "rg-net",
 		Name:           "tm-profile",
-	}}, client, "sub-123", "error", nil)
+	}}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -562,7 +565,7 @@ func TestRunChecks_SupportsTrafficManagerAzureEndpoint(t *testing.T) {
 		ResourceGroup:         "rg-net",
 		TrafficManagerProfile: "tm-profile",
 		Name:                  "endpoint-app",
-	}}, client, "sub-123", "error", nil)
+	}}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -591,7 +594,7 @@ func TestRunChecks_SurfacesIncompleteSubnetExistenceMapping(t *testing.T) {
 		SubscriptionID: "sub-123",
 		ResourceGroup:  "rg-net",
 		Name:           "subnet-app",
-	}}, client, "sub-123", "error", nil)
+	}}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -640,7 +643,7 @@ func TestRunChecks_AppServiceQuotaUsesCanonicalLocationDisplayName(t *testing.T)
 			Name:           "app-win",
 			Location:       "westeurope",
 		},
-	}, client, "sub-123", "error", nil)
+	}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -679,7 +682,7 @@ func TestRunChecks_WindowsWebAppSkipsMicrosoftWebQuotaCheck(t *testing.T) {
 		ResourceGroup:  "rg-app",
 		Name:           "app-win",
 		Location:       "westeurope",
-	}}, client, "sub-123", "error", nil)
+	}}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -737,7 +740,7 @@ func TestRunChecks_MixedResultsRemainDeterministic(t *testing.T) {
 			Mode:         "managed",
 			Action:       "create",
 		},
-	}, client, "sub-123", "error", nil)
+	}, client, "sub-123", "error", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
@@ -749,6 +752,402 @@ func TestRunChecks_MixedResultsRemainDeterministic(t *testing.T) {
 		"PROVIDER_NOT_REGISTERED",
 		"PROVIDER_QUERY_FAILED",
 	})
+}
+
+func TestRunChecks_SurfacesSQLProvisioningRestriction(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-db/providers/Microsoft.Sql/servers/sql-01"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/usages"):
+			writeJSON(w, `{"value":[{"name":{"value":"logical servers"},"currentValue":1,"limit":10}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/capabilities"):
+			writeJSON(w, `{"name":"West Europe","status":"Disabled","reason":"subscription is not allowed to provision Microsoft.Sql in this region","supportedServerVersions":[]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_mssql_server.sql",
+		ResourceType:   "azurerm_mssql_server",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		ResourceGroup:  "rg-db",
+		Name:           "sql-01",
+		Location:       "westeurope",
+	}}, client, "sub-123", "error", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	if !hasFindingCode(findings, "SQL_PROVISIONING_RESTRICTED") {
+		t.Fatalf("expected SQL_PROVISIONING_RESTRICTED, got %+v", findings)
+	}
+	assertFindingMessageContains(t, findings, "SQL_PROVISIONING_RESTRICTED", "choose another region")
+}
+
+func TestRunChecks_SurfacesSQLSKUUnavailable(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/usages"):
+			writeJSON(w, `{"value":[{"name":{"value":"databases"},"currentValue":1,"limit":10}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/capabilities"):
+			writeJSON(w, `{
+				"name":"West Europe",
+				"status":"Available",
+				"supportedServerVersions":[
+					{
+						"name":"12.0",
+						"supportedEditions":[
+							{
+								"name":"GeneralPurpose",
+								"supportedServiceLevelObjectives":[
+									{"name":"GP_S_Gen5_1","status":"Available"},
+									{"name":"GP_S_Gen5_2","status":"Disabled","reason":"sku is temporarily restricted"}
+								],
+								"status":"Available"
+							}
+						],
+						"status":"Available"
+					}
+				]
+			}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_mssql_database.db",
+		ResourceType:   "azurerm_mssql_database",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		ResourceGroup:  "rg-db",
+		Name:           "db-01",
+		Location:       "westeurope",
+		Sku:            "GP_S_Gen5_2",
+	}}, client, "sub-123", "error", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	if !hasFindingCode(findings, "SQL_SKU_UNAVAILABLE") {
+		t.Fatalf("expected SQL_SKU_UNAVAILABLE, got %+v", findings)
+	}
+	assertFindingMessageContains(t, findings, "SQL_SKU_UNAVAILABLE", "GP_S_Gen5_2")
+}
+
+func TestRunChecks_ResolvesSQLDatabaseLocationFromServerID(t *testing.T) {
+	capabilityCalls := 0
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-db/providers/Microsoft.Sql/servers/sql-01"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/usages"):
+			writeJSON(w, `{"value":[{"name":{"value":"logical servers"},"currentValue":1,"limit":10},{"name":{"value":"databases"},"currentValue":1,"limit":10}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/capabilities"):
+			capabilityCalls++
+			writeJSON(w, `{
+				"name":"West Europe",
+				"status":"Available",
+				"supportedServerVersions":[
+					{
+						"name":"12.0",
+						"supportedEditions":[
+							{
+								"name":"GeneralPurpose",
+								"supportedServiceLevelObjectives":[
+									{"name":"GP_S_Gen5_2","status":"Available"}
+								],
+								"status":"Available"
+							}
+						],
+						"status":"Available"
+					}
+				]
+			}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{
+		{
+			Address:        "azurerm_mssql_server.sql",
+			ResourceType:   "azurerm_mssql_server",
+			Mode:           "managed",
+			Action:         "create",
+			SubscriptionID: "sub-123",
+			ResourceGroup:  "rg-db",
+			Name:           "sql-01",
+			Location:       "westeurope",
+		},
+		{
+			Address:        "azurerm_mssql_database.db",
+			ResourceType:   "azurerm_mssql_database",
+			Mode:           "managed",
+			Action:         "create",
+			SubscriptionID: "sub-123",
+			ResourceGroup:  "rg-db",
+			Name:           "db-01",
+			ServerID:       "/subscriptions/sub-123/resourceGroups/rg-db/providers/Microsoft.Sql/servers/sql-01",
+			Sku:            "GP_S_Gen5_2",
+		},
+	}, client, "sub-123", "error", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	if capabilityCalls != 1 {
+		t.Fatalf("expected SQL capabilities to be cached per location, got %d calls", capabilityCalls)
+	}
+	if hasFindingCode(findings, "SQL_LOCATION_UNRESOLVED") {
+		t.Fatalf("did not expect SQL_LOCATION_UNRESOLVED, got %+v", findings)
+	}
+	if hasFindingCode(findings, "SQL_SKU_UNAVAILABLE") {
+		t.Fatalf("did not expect SQL_SKU_UNAVAILABLE, got %+v", findings)
+	}
+}
+
+func TestRunChecks_SurfacesSQLCapabilityQueryFailure(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-db/providers/Microsoft.Sql/servers/sql-01"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/usages"):
+			writeJSON(w, `{"value":[{"name":{"value":"logical servers"},"currentValue":1,"limit":10}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/capabilities"):
+			w.WriteHeader(http.StatusInternalServerError)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_mssql_server.sql",
+		ResourceType:   "azurerm_mssql_server",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		ResourceGroup:  "rg-db",
+		Name:           "sql-01",
+		Location:       "westeurope",
+	}}, client, "sub-123", "error", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	if !hasFindingCode(findings, "SQL_CAPABILITY_QUERY_FAILED") {
+		t.Fatalf("expected SQL_CAPABILITY_QUERY_FAILED, got %+v", findings)
+	}
+}
+
+func TestRunChecks_SurfacesSQLLocationUnresolved(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/usages"):
+			writeJSON(w, `{"value":[{"name":{"value":"databases"},"currentValue":1,"limit":10}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_mssql_database.db",
+		ResourceType:   "azurerm_mssql_database",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		ResourceGroup:  "rg-db",
+		Name:           "db-01",
+	}}, client, "sub-123", "error", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	if !hasFindingCode(findings, "SQL_LOCATION_UNRESOLVED") {
+		t.Fatalf("expected SQL_LOCATION_UNRESOLVED, got %+v", findings)
+	}
+}
+
+func TestRunChecks_KeyVaultSecretRead403ReturnsBlocker(t *testing.T) {
+	vaultBaseURL := ""
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app"):
+			writeJSON(w, fmt.Sprintf(`{"properties":{"vaultUri":"%s/vault"}}`, vaultBaseURL))
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.KeyVault"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		case strings.HasPrefix(r.URL.Path, "/vault/secrets/app-secret"):
+			if r.Method == http.MethodGet {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.WriteHeader(http.StatusBadRequest)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	vaultBaseURL = client.BaseURL
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_key_vault_secret.secret",
+		ResourceType:   "azurerm_key_vault_secret",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		Name:           "app-secret",
+		KeyVaultID:     "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app",
+	}}, client, "sub-123", "error", nil, staticTokenResolver("vault-token"))
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	if !hasFindingCode(findings, "KEY_VAULT_SECRET_ACCESS_DENIED") {
+		t.Fatalf("expected KEY_VAULT_SECRET_ACCESS_DENIED, got %+v", findings)
+	}
+	assertFindingMessageContains(t, findings, "KEY_VAULT_SECRET_ACCESS_DENIED", "secrets/get")
+}
+
+func TestRunChecks_KeyVaultSecretWrite403ReturnsBlocker(t *testing.T) {
+	vaultBaseURL := ""
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app"):
+			writeJSON(w, fmt.Sprintf(`{"properties":{"vaultUri":"%s/vault"}}`, vaultBaseURL))
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.KeyVault"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		case strings.HasPrefix(r.URL.Path, "/vault/secrets/app-secret"):
+			if r.Method == http.MethodGet {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	vaultBaseURL = client.BaseURL
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_key_vault_secret.secret",
+		ResourceType:   "azurerm_key_vault_secret",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		Name:           "app-secret",
+		KeyVaultID:     "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app",
+	}}, client, "sub-123", "error", nil, staticTokenResolver("vault-token"))
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	if !hasFindingCode(findings, "KEY_VAULT_SECRET_ACCESS_DENIED") {
+		t.Fatalf("expected KEY_VAULT_SECRET_ACCESS_DENIED, got %+v", findings)
+	}
+	assertFindingMessageContains(t, findings, "KEY_VAULT_SECRET_ACCESS_DENIED", "secrets/set")
+}
+
+func TestRunChecks_KeyVaultSecretRead404Write400Passes(t *testing.T) {
+	vaultBaseURL := ""
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app"):
+			writeJSON(w, fmt.Sprintf(`{"properties":{"vaultUri":"%s/vault"}}`, vaultBaseURL))
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.KeyVault"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		case strings.HasPrefix(r.URL.Path, "/vault/secrets/app-secret"):
+			if r.Method == http.MethodGet {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusBadRequest)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	vaultBaseURL = client.BaseURL
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_key_vault_secret.secret",
+		ResourceType:   "azurerm_key_vault_secret",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		Name:           "app-secret",
+		KeyVaultID:     "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app",
+	}}, client, "sub-123", "error", nil, staticTokenResolver("vault-token"))
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected no findings, got %+v", findings)
+	}
+}
+
+func TestRunChecks_KeyVaultSecretProbeFailureReturnsDegraded(t *testing.T) {
+	vaultBaseURL := ""
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app"):
+			writeJSON(w, fmt.Sprintf(`{"properties":{"vaultUri":"%s/vault"}}`, vaultBaseURL))
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.KeyVault"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		case strings.HasPrefix(r.URL.Path, "/vault/secrets/app-secret"):
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	vaultBaseURL = client.BaseURL
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_key_vault_secret.secret",
+		ResourceType:   "azurerm_key_vault_secret",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		Name:           "app-secret",
+		KeyVaultID:     "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app",
+	}}, client, "sub-123", "error", nil, staticTokenResolver("vault-token"))
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	if !hasFindingCode(findings, "KEY_VAULT_SECRET_CHECK_FAILED") {
+		t.Fatalf("expected KEY_VAULT_SECRET_CHECK_FAILED, got %+v", findings)
+	}
 }
 
 func newAzureTestClient(t *testing.T, handler http.HandlerFunc) *AzureClient {
@@ -786,5 +1185,22 @@ func assertFindingCodes(t *testing.T, findings []model.Finding, want []string) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected finding codes: got %v want %v", got, want)
+	}
+}
+
+func assertFindingMessageContains(t *testing.T, findings []model.Finding, code, substring string) {
+	t.Helper()
+
+	for _, finding := range findings {
+		if finding.Code == code && strings.Contains(finding.Message, substring) {
+			return
+		}
+	}
+	t.Fatalf("expected %s message containing %q, got %+v", code, substring, findings)
+}
+
+func staticTokenResolver(token string) func(resource string) (string, error) {
+	return func(resource string) (string, error) {
+		return token, nil
 	}
 }

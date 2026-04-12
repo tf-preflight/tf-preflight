@@ -13,6 +13,8 @@ type Candidate struct {
 	ResourceGroup         string         `json:"resource_group,omitempty"`
 	TrafficManagerProfile string         `json:"traffic_manager_profile,omitempty"`
 	VirtualNetwork        string         `json:"virtual_network,omitempty"`
+	ServerID              string         `json:"server_id,omitempty"`
+	KeyVaultID            string         `json:"key_vault_id,omitempty"`
 	Name                  string         `json:"name,omitempty"`
 	Sku                   string         `json:"sku,omitempty"`
 	Namespace             string         `json:"namespace"`

@@ -63,11 +63,16 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 		}
 		base.Location = firstString(item.Change.After, "location")
 		base.ResourceGroup = firstString(item.Change.After, "resource_group_name")
+		base.ServerID = firstString(item.Change.After, "server_id")
+		base.KeyVaultID = firstString(item.Change.After, "key_vault_id")
 		base.VirtualNetwork = firstString(item.Change.After, "virtual_network_name")
 		base.Name = firstString(item.Change.After, "name")
 		mergeTrafficManagerProfileFields(&base, firstString(item.Change.After, "profile_name"), firstString(item.Change.After, "profile_id"))
 		if sku := pickNestedString(item.Change.After, "sku", "name"); sku != "" {
 			base.Sku = sku
+		}
+		if base.Sku == "" {
+			base.Sku = firstString(item.Change.After, "sku_name")
 		}
 		for _, r := range []string{"ip_restriction", "firewall_rules"} {
 			if v, ok := item.Change.After[r]; ok {
@@ -86,6 +91,12 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 			}
 			if base.ResourceGroup == "" {
 				base.ResourceGroup = hcl.ResourceGroup
+			}
+			if base.ServerID == "" {
+				base.ServerID = hcl.ServerID
+			}
+			if base.KeyVaultID == "" {
+				base.KeyVaultID = hcl.KeyVaultID
 			}
 			if base.VirtualNetwork == "" {
 				base.VirtualNetwork = hcl.VirtualNetwork
@@ -133,10 +144,15 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 			}
 			base.Location = firstString(item.Values, "location")
 			base.ResourceGroup = firstString(item.Values, "resource_group_name")
+			base.ServerID = firstString(item.Values, "server_id")
+			base.KeyVaultID = firstString(item.Values, "key_vault_id")
 			base.VirtualNetwork = firstString(item.Values, "virtual_network_name")
 			base.Name = firstString(item.Values, "name")
 			mergeTrafficManagerProfileFields(&base, firstString(item.Values, "profile_name"), firstString(item.Values, "profile_id"))
 			base.Sku = pickNestedString(item.Values, "sku", "name")
+			if base.Sku == "" {
+				base.Sku = firstString(item.Values, "sku_name")
+			}
 			candidates = append(candidates, base)
 		}
 	}

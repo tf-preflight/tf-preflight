@@ -1,6 +1,7 @@
 package azure
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,9 +25,20 @@ type ResourceMeta struct {
 	QuotaChecks []string
 }
 
+const (
+	ResourceManagerAudience      = "https://management.azure.com"
+	KeyVaultAudience             = "https://vault.azure.net"
+	sqlCapabilitiesAPIVersion    = "2025-01-01"
+	sqlServerAPIVersion          = "2023-02-01"
+	keyVaultSecretAPIVersion     = "7.4"
+	keyVaultManagementAPIVersion = "2022-07-01"
+	unknownSubscriptionID        = "__tfpreflight_unknown__"
+)
+
 type locationCatalog struct {
 	known           map[string]struct{}
 	canonicalByName map[string]string
+	apiNameByName   map[string]string
 }
 
 var resourceMeta = map[string]ResourceMeta{
@@ -92,6 +104,9 @@ var resourceMeta = map[string]ResourceMeta{
 		Namespace:  "Microsoft.Sql",
 		ExistsPath: "",
 		QuotaPath:  "",
+	},
+	"azurerm_key_vault_secret": {
+		Namespace: "Microsoft.KeyVault",
 	},
 }
 
@@ -228,6 +243,46 @@ type usageResponse struct {
 	} `json:"value"`
 }
 
+type sqlLocationCapabilities struct {
+	Name                    string                     `json:"name"`
+	Status                  string                     `json:"status"`
+	Reason                  string                     `json:"reason"`
+	SupportedServerVersions []sqlServerVersionResponse `json:"supportedServerVersions"`
+}
+
+type sqlServerVersionResponse struct {
+	Name              string                     `json:"name"`
+	Status            string                     `json:"status"`
+	Reason            string                     `json:"reason"`
+	SupportedEditions []sqlEditionCapabilityItem `json:"supportedEditions"`
+}
+
+type sqlEditionCapabilityItem struct {
+	Name                            string                              `json:"name"`
+	Status                          string                              `json:"status"`
+	Reason                          string                              `json:"reason"`
+	SupportedServiceLevelObjectives []sqlServiceObjectiveCapabilityItem `json:"supportedServiceLevelObjectives"`
+}
+
+type sqlServiceObjectiveCapabilityItem struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+	Sku    struct {
+		Name string `json:"name"`
+	} `json:"sku"`
+}
+
+type keyVaultManagementResponse struct {
+	Properties struct {
+		VaultURI string `json:"vaultUri"`
+	} `json:"properties"`
+}
+
+type armResourceLocationResponse struct {
+	Location string `json:"location"`
+}
+
 func NewAzureClient(token string) *AzureClient {
 	return &AzureClient{
 		HTTPClient: &http.Client{Timeout: 20 * time.Second},
@@ -244,13 +299,26 @@ func (c *AzureClient) baseURL() string {
 }
 
 func (c *AzureClient) doRequest(ctx context.Context, method, path string) (*http.Response, error) {
+	return c.doRequestWithBody(ctx, method, path, nil, "")
+}
+
+func (c *AzureClient) doRequestWithBody(ctx context.Context, method, path string, body []byte, contentType string) (*http.Response, error) {
 	requestURL := c.baseURL() + path
-	req, err := http.NewRequestWithContext(ctx, method, requestURL, nil)
+	var reader *bytes.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	} else {
+		reader = bytes.NewReader(nil)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, reader)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.Token))
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", firstNonEmptyString(contentType, "application/json"))
+	}
 
 	res, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -279,7 +347,11 @@ func (c *AzureClient) callJSON(ctx context.Context, method, path string, out any
 }
 
 func (c *AzureClient) ProbePath(ctx context.Context, method, path string) (int, error) {
-	res, err := c.doRequest(ctx, method, path)
+	return c.ProbePathWithBody(ctx, method, path, nil, "")
+}
+
+func (c *AzureClient) ProbePathWithBody(ctx context.Context, method, path string, body []byte, contentType string) (int, error) {
+	res, err := c.doRequestWithBody(ctx, method, path, body, contentType)
 	if err != nil {
 		return 0, err
 	}
@@ -291,7 +363,7 @@ func (c *AzureClient) ProbePath(ctx context.Context, method, path string) (int, 
 	return res.StatusCode, nil
 }
 
-func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureClient, subscriptionID string, threshold string, progress *ui.Progress) ([]model.Finding, error) {
+func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureClient, subscriptionID string, threshold string, progress *ui.Progress, tokenResolver func(resource string) (string, error)) ([]model.Finding, error) {
 	_ = threshold
 	if client == nil || strings.TrimSpace(client.Token) == "" {
 		return nil, fmt.Errorf("no azure token available")
@@ -308,6 +380,7 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 		if candidates[i].SubscriptionID == "" {
 			candidates[i].SubscriptionID = subscriptionID
 		}
+		hydrateDerivedResourceIDs(&candidates[i])
 	}
 
 	findings := []model.Finding{}
@@ -325,6 +398,8 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 	}
 
 	providers := map[string]struct{}{}
+	sqlServerLookup := buildCandidateLookupByImportID(candidates, "azurerm_mssql_server")
+	sqlCapabilityCache := map[string]*sqlLocationCapabilities{}
 	if progress != nil {
 		progress.Start("evaluating resources", len(candidates))
 	}
@@ -353,8 +428,13 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 		providers[meta.Namespace] = struct{}{}
 
 		if candidate.Action == "create" || candidate.Action == "update" || candidate.Action == "replace" {
-			findings = append(findings, runExistenceCheck(ctx, client, candidate)...)
-			findings = append(findings, runQuotaCheck(ctx, client, meta, candidate, locs)...)
+			findings = append(findings, runSQLCapabilityCheck(ctx, client, candidate, subscriptionID, locs, sqlServerLookup, sqlCapabilityCache)...)
+			if candidate.ResourceType == "azurerm_key_vault_secret" {
+				findings = append(findings, runKeyVaultSecretAccessCheck(ctx, client, candidate, tokenResolver)...)
+			} else {
+				findings = append(findings, runExistenceCheck(ctx, client, candidate)...)
+				findings = append(findings, runQuotaCheck(ctx, client, meta, candidate, locs)...)
+			}
 		}
 		if progress != nil {
 			progress.Tick(fmt.Sprintf("checked %s", candidate.Address))
@@ -400,11 +480,322 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 
 func requiresExplicitLocation(resourceType string) bool {
 	switch resourceType {
-	case "azurerm_subnet", "azurerm_traffic_manager_profile", "azurerm_traffic_manager_azure_endpoint":
+	case "azurerm_subnet",
+		"azurerm_traffic_manager_profile",
+		"azurerm_traffic_manager_azure_endpoint",
+		"azurerm_mssql_database",
+		"azurerm_key_vault_secret":
 		return false
 	default:
 		return true
 	}
+}
+
+func runSQLCapabilityCheck(ctx context.Context, client *AzureClient, candidate model.Candidate, subscriptionID string, locations *locationCatalog, serverLookup map[string]model.Candidate, cache map[string]*sqlLocationCapabilities) []model.Finding {
+	switch candidate.ResourceType {
+	case "azurerm_mssql_server":
+		location := strings.TrimSpace(candidate.Location)
+		if location == "" {
+			return nil
+		}
+		if locations != nil && !isLocationAvailable(locations, location) {
+			return nil
+		}
+		return evaluateSQLLocationCapability(ctx, client, candidate, subscriptionID, locations, location, "", cache)
+	case "azurerm_mssql_database":
+		location, err := resolveSQLDatabaseLocation(ctx, client, candidate, serverLookup)
+		if err != nil {
+			return []model.Finding{{
+				Severity: "warn",
+				Code:     "SQL_LOCATION_UNRESOLVED",
+				Message:  fmt.Sprintf("unable to resolve SQL database location before capability check: %v", err),
+				Resource: candidate.Address,
+			}}
+		}
+		if locations != nil && !isLocationAvailable(locations, location) {
+			return nil
+		}
+		return evaluateSQLLocationCapability(ctx, client, candidate, subscriptionID, locations, location, strings.TrimSpace(candidate.Sku), cache)
+	default:
+		return nil
+	}
+}
+
+func evaluateSQLLocationCapability(ctx context.Context, client *AzureClient, candidate model.Candidate, subscriptionID string, locations *locationCatalog, location, sku string, cache map[string]*sqlLocationCapabilities) []model.Finding {
+	capabilities, err := fetchSQLCapabilities(ctx, client, subscriptionID, locations, location, cache)
+	if err != nil {
+		return []model.Finding{{
+			Severity: "warn",
+			Code:     "SQL_CAPABILITY_QUERY_FAILED",
+			Message:  fmt.Sprintf("SQL capability check unavailable for %s in %s: %v", candidate.ResourceType, displayLocation(locations, location), err),
+			Resource: candidate.Address,
+		}}
+	}
+
+	resolvedLocation := displayLocation(locations, firstNonEmptyString(capabilities.Name, location))
+	if !isCapabilityProvisionable(capabilities.Status) {
+		return []model.Finding{{
+			Severity: "error",
+			Code:     "SQL_PROVISIONING_RESTRICTED",
+			Message:  fmt.Sprintf("Microsoft.Sql provisioning is restricted in %s%s; choose another region or satisfy the stated provider restriction", resolvedLocation, formatCapabilityReason(capabilities.Reason)),
+			Resource: candidate.Address,
+		}}
+	}
+
+	if strings.TrimSpace(sku) == "" {
+		return nil
+	}
+	available, reason, found := sqlServiceObjectiveAvailability(capabilities, sku)
+	if found && available {
+		return nil
+	}
+
+	message := fmt.Sprintf("SQL SKU %s is not available in %s for this subscription; choose a supported SKU/region combination", sku, resolvedLocation)
+	if found && strings.TrimSpace(reason) != "" {
+		message += fmt.Sprintf(" (%s)", reason)
+	}
+	return []model.Finding{{
+		Severity: "error",
+		Code:     "SQL_SKU_UNAVAILABLE",
+		Message:  message,
+		Resource: candidate.Address,
+	}}
+}
+
+func resolveSQLDatabaseLocation(ctx context.Context, client *AzureClient, candidate model.Candidate, serverLookup map[string]model.Candidate) (string, error) {
+	if location := strings.TrimSpace(candidate.Location); location != "" {
+		return location, nil
+	}
+
+	serverID := strings.TrimSpace(candidate.ServerID)
+	if serverID == "" {
+		return "", fmt.Errorf("server_id is missing")
+	}
+
+	if serverCandidate, ok := serverLookup[normalizeResourceID(serverID)]; ok {
+		if location := strings.TrimSpace(serverCandidate.Location); location != "" {
+			return location, nil
+		}
+	}
+
+	response := &armResourceLocationResponse{}
+	path := fmt.Sprintf("%s?api-version=%s", serverID, sqlServerAPIVersion)
+	if err := client.callJSON(ctx, "GET", path, response); err != nil {
+		return "", fmt.Errorf("cannot read SQL server location from %s: %v", serverID, err)
+	}
+	if strings.TrimSpace(response.Location) == "" {
+		return "", fmt.Errorf("SQL server %s returned an empty location", serverID)
+	}
+	return response.Location, nil
+}
+
+func fetchSQLCapabilities(ctx context.Context, client *AzureClient, subscriptionID string, locations *locationCatalog, location string, cache map[string]*sqlLocationCapabilities) (*sqlLocationCapabilities, error) {
+	apiLocation := sqlLocationValue(locations, location)
+	cacheKey := subscriptionID + "|" + strings.ToLower(apiLocation)
+	if cached, ok := cache[cacheKey]; ok {
+		return cached, nil
+	}
+
+	response := &sqlLocationCapabilities{}
+	path := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Sql/locations/%s/capabilities?api-version=%s", subscriptionID, url.PathEscape(apiLocation), sqlCapabilitiesAPIVersion)
+	if err := client.callJSON(ctx, "GET", path, response); err != nil {
+		return nil, err
+	}
+	cache[cacheKey] = response
+	return response, nil
+}
+
+func sqlServiceObjectiveAvailability(capabilities *sqlLocationCapabilities, sku string) (bool, string, bool) {
+	sku = strings.TrimSpace(sku)
+	if capabilities == nil || sku == "" {
+		return false, "", false
+	}
+
+	found := false
+	reason := ""
+	for _, version := range capabilities.SupportedServerVersions {
+		for _, edition := range version.SupportedEditions {
+			for _, objective := range edition.SupportedServiceLevelObjectives {
+				if !strings.EqualFold(strings.TrimSpace(objective.Name), sku) && !strings.EqualFold(strings.TrimSpace(objective.Sku.Name), sku) {
+					continue
+				}
+				found = true
+				if isCapabilityProvisionable(objective.Status) {
+					return true, "", true
+				}
+				if reason == "" {
+					reason = firstNonEmptyString(objective.Reason, edition.Reason, version.Reason)
+				}
+			}
+		}
+	}
+	return false, reason, found
+}
+
+func isCapabilityProvisionable(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "available", "default":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatCapabilityReason(reason string) string {
+	if strings.TrimSpace(reason) == "" {
+		return ""
+	}
+	return ": " + strings.TrimSpace(reason)
+}
+
+func runKeyVaultSecretAccessCheck(ctx context.Context, client *AzureClient, candidate model.Candidate, tokenResolver func(resource string) (string, error)) []model.Finding {
+	missing := missingFields(map[string]string{
+		"key_vault_id": candidate.KeyVaultID,
+		"name":         candidate.Name,
+	})
+	if len(missing) > 0 {
+		return []model.Finding{{
+			Severity: "warn",
+			Code:     "KEY_VAULT_SECRET_CHECK_FAILED",
+			Message:  fmt.Sprintf("key vault secret access check skipped; missing fields: %s", strings.Join(missing, ", ")),
+			Resource: candidate.Address,
+			Detail: map[string]any{
+				"missing_fields": missing,
+			},
+		}}
+	}
+
+	vaultResponse := &keyVaultManagementResponse{}
+	managementPath := fmt.Sprintf("%s?api-version=%s", candidate.KeyVaultID, keyVaultManagementAPIVersion)
+	if err := client.callJSON(ctx, "GET", managementPath, vaultResponse); err != nil {
+		return []model.Finding{{
+			Severity: "warn",
+			Code:     "KEY_VAULT_SECRET_CHECK_FAILED",
+			Message:  fmt.Sprintf("cannot read Key Vault metadata for %s: %v", candidate.KeyVaultID, err),
+			Resource: candidate.Address,
+		}}
+	}
+
+	vaultURI := strings.TrimSpace(vaultResponse.Properties.VaultURI)
+	if vaultURI == "" {
+		return []model.Finding{{
+			Severity: "warn",
+			Code:     "KEY_VAULT_SECRET_CHECK_FAILED",
+			Message:  fmt.Sprintf("Key Vault %s did not return a vaultUri for secret access checks", candidate.KeyVaultID),
+			Resource: candidate.Address,
+		}}
+	}
+
+	if tokenResolver == nil {
+		return []model.Finding{{
+			Severity: "warn",
+			Code:     "KEY_VAULT_SECRET_CHECK_FAILED",
+			Message:  "Key Vault secret access check requires a vault-scoped token resolver",
+			Resource: candidate.Address,
+		}}
+	}
+
+	vaultToken, err := tokenResolver(KeyVaultAudience)
+	if err != nil {
+		return []model.Finding{{
+			Severity: "warn",
+			Code:     "KEY_VAULT_SECRET_CHECK_FAILED",
+			Message:  fmt.Sprintf("cannot resolve Key Vault data-plane token for %s: %v", vaultURI, err),
+			Resource: candidate.Address,
+		}}
+	}
+
+	vaultClient := NewAzureClient(vaultToken)
+	vaultClient.BaseURL = strings.TrimRight(vaultURI, "/")
+	vaultClient.HTTPClient = client.HTTPClient
+
+	findings := []model.Finding{}
+	secretPath := fmt.Sprintf("/secrets/%s?api-version=%s", url.PathEscape(candidate.Name), keyVaultSecretAPIVersion)
+
+	readStatus, readErr := vaultClient.ProbePath(ctx, "GET", secretPath)
+	switch {
+	case readStatus == http.StatusForbidden:
+		findings = append(findings, model.Finding{
+			Severity: "error",
+			Code:     "KEY_VAULT_SECRET_ACCESS_DENIED",
+			Message:  fmt.Sprintf("Key Vault secret read access denied for %s; grant secrets/get or an equivalent Key Vault data-plane role/access policy", vaultURI),
+			Resource: candidate.Address,
+			Detail: map[string]any{
+				"permission": "secrets/get",
+				"vault_uri":  vaultURI,
+			},
+		})
+	case readErr != nil:
+		findings = append(findings, model.Finding{
+			Severity: "warn",
+			Code:     "KEY_VAULT_SECRET_CHECK_FAILED",
+			Message:  fmt.Sprintf("Key Vault secret read probe failed for %s: %v", vaultURI, readErr),
+			Resource: candidate.Address,
+		})
+	case readStatus == http.StatusNotFound:
+		// A 404 confirms the caller can read the vault but the secret does not exist yet.
+	case readStatus >= 200 && readStatus < 300:
+		// Read access confirmed.
+	default:
+		findings = append(findings, model.Finding{
+			Severity: "warn",
+			Code:     "KEY_VAULT_SECRET_CHECK_FAILED",
+			Message:  fmt.Sprintf("Key Vault secret read probe returned unexpected status %d for %s", readStatus, vaultURI),
+			Resource: candidate.Address,
+			Detail: map[string]any{
+				"status_code": readStatus,
+				"permission":  "secrets/get",
+			},
+		})
+	}
+
+	writeStatus, writeErr := vaultClient.ProbePathWithBody(ctx, "PUT", secretPath, []byte(`{}`), "application/json")
+	switch {
+	case writeStatus == http.StatusForbidden:
+		findings = append(findings, model.Finding{
+			Severity: "error",
+			Code:     "KEY_VAULT_SECRET_ACCESS_DENIED",
+			Message:  fmt.Sprintf("Key Vault secret write access denied for %s; grant secrets/set or an equivalent Key Vault data-plane role/access policy", vaultURI),
+			Resource: candidate.Address,
+			Detail: map[string]any{
+				"permission": "secrets/set",
+				"vault_uri":  vaultURI,
+			},
+		})
+	case writeErr != nil:
+		findings = append(findings, model.Finding{
+			Severity: "warn",
+			Code:     "KEY_VAULT_SECRET_CHECK_FAILED",
+			Message:  fmt.Sprintf("Key Vault secret write probe failed for %s: %v", vaultURI, writeErr),
+			Resource: candidate.Address,
+		})
+	case writeStatus == http.StatusBadRequest:
+		// A 400 from an intentionally invalid payload proves authorization succeeded.
+	case writeStatus >= 200 && writeStatus < 300:
+		findings = append(findings, model.Finding{
+			Severity: "warn",
+			Code:     "KEY_VAULT_SECRET_CHECK_FAILED",
+			Message:  fmt.Sprintf("Key Vault secret write probe unexpectedly succeeded for %s", vaultURI),
+			Resource: candidate.Address,
+			Detail: map[string]any{
+				"status_code": writeStatus,
+				"permission":  "secrets/set",
+			},
+		})
+	default:
+		findings = append(findings, model.Finding{
+			Severity: "warn",
+			Code:     "KEY_VAULT_SECRET_CHECK_FAILED",
+			Message:  fmt.Sprintf("Key Vault secret write probe returned unexpected status %d for %s", writeStatus, vaultURI),
+			Resource: candidate.Address,
+			Detail: map[string]any{
+				"status_code": writeStatus,
+				"permission":  "secrets/set",
+			},
+		})
+	}
+
+	return findings
 }
 
 func runQuotaCheck(ctx context.Context, client *AzureClient, meta ResourceMeta, candidate model.Candidate, locations *locationCatalog) []model.Finding {
@@ -516,11 +907,16 @@ func fetchLocations(ctx context.Context, client *AzureClient, subscription strin
 	}
 	known := map[string]struct{}{}
 	canonical := map[string]string{}
+	apiNames := map[string]string{}
 	for _, item := range resp.Value {
 		nameKey := strings.ToLower(strings.TrimSpace(item.Name))
 		displayKey := strings.ToLower(strings.TrimSpace(item.DisplayName))
 		known[nameKey] = struct{}{}
 		known[displayKey] = struct{}{}
+		apiNames[nameKey] = item.Name
+		if displayKey != "" {
+			apiNames[displayKey] = item.Name
+		}
 		if strings.TrimSpace(item.DisplayName) != "" {
 			canonical[nameKey] = item.DisplayName
 			canonical[displayKey] = item.DisplayName
@@ -529,6 +925,7 @@ func fetchLocations(ctx context.Context, client *AzureClient, subscription strin
 	return &locationCatalog{
 		known:           known,
 		canonicalByName: canonical,
+		apiNameByName:   apiNames,
 	}, nil
 }
 
@@ -594,6 +991,69 @@ func quotaLocationValue(meta ResourceMeta, locations *locationCatalog, location 
 		return trimmed
 	}
 	return strings.ToLower(trimmed)
+}
+
+func sqlLocationValue(locations *locationCatalog, location string) string {
+	trimmed := strings.TrimSpace(location)
+	if locations != nil {
+		if apiName := strings.TrimSpace(locations.apiNameByName[strings.ToLower(trimmed)]); apiName != "" {
+			return apiName
+		}
+	}
+	return strings.ToLower(strings.ReplaceAll(trimmed, " ", ""))
+}
+
+func displayLocation(locations *locationCatalog, location string) string {
+	trimmed := strings.TrimSpace(location)
+	if trimmed == "" {
+		return location
+	}
+	if locations != nil {
+		if display := strings.TrimSpace(locations.canonicalByName[strings.ToLower(trimmed)]); display != "" {
+			return display
+		}
+	}
+	return trimmed
+}
+
+func buildCandidateLookupByImportID(candidates []model.Candidate, resourceType string) map[string]model.Candidate {
+	lookup := map[string]model.Candidate{}
+	for _, candidate := range candidates {
+		if candidate.ResourceType != resourceType {
+			continue
+		}
+		id, missing, ok := BuildImportID(candidate)
+		if !ok || len(missing) > 0 {
+			continue
+		}
+		lookup[normalizeResourceID(id)] = candidate
+	}
+	return lookup
+}
+
+func normalizeResourceID(resourceID string) string {
+	return strings.ToLower(strings.TrimSpace(resourceID))
+}
+
+func hydrateDerivedResourceIDs(candidate *model.Candidate) {
+	if candidate == nil || strings.TrimSpace(candidate.SubscriptionID) == "" {
+		return
+	}
+	if strings.Contains(candidate.ServerID, unknownSubscriptionID) {
+		candidate.ServerID = strings.ReplaceAll(candidate.ServerID, unknownSubscriptionID, candidate.SubscriptionID)
+	}
+	if strings.Contains(candidate.KeyVaultID, unknownSubscriptionID) {
+		candidate.KeyVaultID = strings.ReplaceAll(candidate.KeyVaultID, unknownSubscriptionID, candidate.SubscriptionID)
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func ResolveSubscriptionFromCLI() (string, error) {

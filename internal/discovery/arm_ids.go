@@ -93,6 +93,11 @@ func buildCandidateResourceID(candidate model.Candidate) (string, bool) {
 			return "", false
 		}
 		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Sql/servers/%s", subscriptionID, candidate.ResourceGroup, candidate.Name), true
+	case "azurerm_key_vault":
+		if missingCandidateFields(candidate.ResourceGroup, candidate.Name) {
+			return "", false
+		}
+		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.KeyVault/vaults/%s", subscriptionID, candidate.ResourceGroup, candidate.Name), true
 	default:
 		return "", false
 	}

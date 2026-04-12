@@ -125,3 +125,69 @@ resource "azurerm_traffic_manager_azure_endpoint" "app" {
 		t.Fatalf("expected traffic manager profile tm-profile, got %s", got)
 	}
 }
+
+func TestParseDirectoryExtractsSQLAndKeyVaultReferences(t *testing.T) {
+	dir := t.TempDir()
+	content := `
+provider "azurerm" {
+  subscription_id = "sub-123"
+  features {}
+}
+
+resource "azurerm_key_vault" "kv" {
+  name                = "kv-app"
+  location            = "westeurope"
+  resource_group_name = "rg-sec"
+  tenant_id           = "00000000-0000-0000-0000-000000000000"
+  sku_name            = "standard"
+}
+
+resource "azurerm_mssql_server" "sql" {
+  name                         = "sql-01"
+  location                     = "westeurope"
+  resource_group_name          = "rg-db"
+  version                      = "12.0"
+  administrator_login          = "sqladmin"
+  administrator_login_password = "Password123!"
+}
+
+resource "azurerm_mssql_database" "db" {
+  name      = "db-01"
+  server_id = azurerm_mssql_server.sql.id
+  sku_name  = "GP_S_Gen5_2"
+}
+
+resource "azurerm_key_vault_secret" "secret" {
+  name         = "app-secret"
+  key_vault_id = azurerm_key_vault.kv.id
+  value        = "super-secret"
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, err := ParseDirectory(dir)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	db, ok := ctx.CandidateMap["azurerm_mssql_database.db"]
+	if !ok {
+		t.Fatalf("expected mssql database candidate, got %#v", ctx.CandidateMap)
+	}
+	if got := db.ServerID; got != "/subscriptions/sub-123/resourceGroups/rg-db/providers/Microsoft.Sql/servers/sql-01" {
+		t.Fatalf("expected resolved server ID, got %s", got)
+	}
+	if got := db.Sku; got != "GP_S_Gen5_2" {
+		t.Fatalf("expected sku GP_S_Gen5_2, got %s", got)
+	}
+
+	secret, ok := ctx.CandidateMap["azurerm_key_vault_secret.secret"]
+	if !ok {
+		t.Fatalf("expected key vault secret candidate, got %#v", ctx.CandidateMap)
+	}
+	if got := secret.KeyVaultID; got != "/subscriptions/sub-123/resourceGroups/rg-sec/providers/Microsoft.KeyVault/vaults/kv-app" {
+		t.Fatalf("expected resolved key vault ID, got %s", got)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tf-preflight/tf-preflight/internal/azure"
 	"github.com/tf-preflight/tf-preflight/internal/discovery"
 	"github.com/tf-preflight/tf-preflight/internal/model"
 )
@@ -229,5 +230,78 @@ printf '%s\n' 'sub-from-az'
 	}
 	if subscriptionID != "sub-from-az" {
 		t.Fatalf("expected Azure CLI fallback subscription, got %q", subscriptionID)
+	}
+}
+
+func TestResolveAzureTokenForResource_UsesVaultSpecificEnvVars(t *testing.T) {
+	t.Setenv("AZURE_ACCESS_TOKEN", "mgmt-token")
+	t.Setenv("AZURE_KEYVAULT_ACCESS_TOKEN", "vault-token")
+
+	token, err := resolveAzureTokenForResource(azure.KeyVaultAudience, false)
+	if err != nil {
+		t.Fatalf("unexpected token resolution error: %v", err)
+	}
+	if token != "vault-token" {
+		t.Fatalf("expected vault token, got %q", token)
+	}
+}
+
+func TestResolveAzureTokenForResource_DoesNotReuseManagementEnvForKeyVault(t *testing.T) {
+	t.Setenv("AZURE_ACCESS_TOKEN", "mgmt-token")
+	t.Setenv("AZURE_KEYVAULT_ACCESS_TOKEN", "")
+	t.Setenv("ARM_KEYVAULT_ACCESS_TOKEN", "")
+	t.Setenv("AZURE_KEYVAULT_CLI_TOKEN", "")
+	t.Setenv("PATH", t.TempDir())
+
+	_, err := resolveAzureTokenForResource(azure.KeyVaultAudience, false)
+	if err == nil {
+		t.Fatal("expected vault token resolution to fail without a vault-scoped token source")
+	}
+}
+
+func TestResolveAzureTokenForResource_FallsBackToAzureCLIByAudience(t *testing.T) {
+	binDir := t.TempDir()
+	azPath := filepath.Join(binDir, "az")
+	script := `#!/bin/sh
+set -eu
+resource="$4"
+case "$resource" in
+  https://management.azure.com)
+    printf '%s\n' 'mgmt-token'
+    ;;
+  https://vault.azure.net)
+    printf '%s\n' 'vault-token'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(azPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("unable to write az stub: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AZURE_ACCESS_TOKEN", "")
+	t.Setenv("ARM_ACCESS_TOKEN", "")
+	t.Setenv("AZURE_CLI_TOKEN", "")
+	t.Setenv("AZURE_KEYVAULT_ACCESS_TOKEN", "")
+	t.Setenv("ARM_KEYVAULT_ACCESS_TOKEN", "")
+	t.Setenv("AZURE_KEYVAULT_CLI_TOKEN", "")
+
+	mgmtToken, err := resolveAzureTokenForResource(azure.ResourceManagerAudience, false)
+	if err != nil {
+		t.Fatalf("unexpected management token resolution error: %v", err)
+	}
+	if mgmtToken != "mgmt-token" {
+		t.Fatalf("expected management token, got %q", mgmtToken)
+	}
+
+	vaultToken, err := resolveAzureTokenForResource(azure.KeyVaultAudience, false)
+	if err != nil {
+		t.Fatalf("unexpected vault token resolution error: %v", err)
+	}
+	if vaultToken != "vault-token" {
+		t.Fatalf("expected vault token, got %q", vaultToken)
 	}
 }

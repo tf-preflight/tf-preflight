@@ -471,16 +471,26 @@ func enrichResourceCandidate(b *hcl.Block, ctx *HCLContext) {
 
 	blockContent, _, _ := b.Body.PartialContent(&hcl.BodySchema{
 		Attributes: []hcl.AttributeSchema{
+			{Name: "key_vault_id"},
 			{Name: "location"},
 			{Name: "name"},
 			{Name: "profile_id"},
 			{Name: "profile_name"},
 			{Name: "resource_group_name"},
+			{Name: "server_id"},
 			{Name: "virtual_network_name"},
 			{Name: "sku"},
+			{Name: "sku_name"},
 		},
 	})
 	if blockContent != nil {
+		if v, ok := blockContent.Attributes["key_vault_id"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					cand.KeyVaultID = s
+				}
+			}
+		}
 		if v, ok := blockContent.Attributes["location"]; ok {
 			if val, ok := evalExpression(v.Expr, ctx); ok {
 				if s, ok := toString(val); ok {
@@ -499,6 +509,13 @@ func enrichResourceCandidate(b *hcl.Block, ctx *HCLContext) {
 			if val, ok := evalExpression(v.Expr, ctx); ok {
 				if s, ok := toString(val); ok {
 					cand.ResourceGroup = s
+				}
+			}
+		}
+		if v, ok := blockContent.Attributes["server_id"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					cand.ServerID = s
 				}
 			}
 		}
@@ -530,6 +547,15 @@ func enrichResourceCandidate(b *hcl.Block, ctx *HCLContext) {
 			if val, ok := evalExpression(v.Expr, ctx); ok {
 				if s, ok := pickSKU(val); ok {
 					cand.Sku = s
+				}
+			}
+		}
+		if cand.Sku == "" {
+			if v, ok := blockContent.Attributes["sku_name"]; ok {
+				if val, ok := evalExpression(v.Expr, ctx); ok {
+					if s, ok := pickSKU(val); ok {
+						cand.Sku = s
+					}
 				}
 			}
 		}
@@ -1011,8 +1037,12 @@ func candidateTraversalValue(candidate model.Candidate, attrs []string) (any, bo
 		value = candidate.Name
 	case "location":
 		value = candidate.Location
+	case "key_vault_id":
+		value = candidate.KeyVaultID
 	case "resource_group_name":
 		value = candidate.ResourceGroup
+	case "server_id":
+		value = candidate.ServerID
 	case "virtual_network_name":
 		value = candidate.VirtualNetwork
 	case "traffic_manager_profile", "profile_name":
