@@ -17,43 +17,67 @@ import (
 )
 
 type HCLContext struct {
-	Variables     map[string]any
-	Locals        map[string]any
+	Variables           map[string]any
+	Locals              map[string]any
+	Subscription        string
+	RootDir             string
+	AddressPrefix       string
+	EachKey             string
+	EachValue           any
+	CandidateMap        map[string]model.Candidate
+	TraversalCandidates map[string]model.Candidate
+	Candidates          []model.Candidate
+	ModuleImports       []model.ModuleImport
+	ModuleCalls         []moduleCall
+	Findings            []model.Finding
+}
+
+type moduleCall struct {
+	ImportIndex int
+	Name        string
+	File        string
+	Attributes  map[string]hcl.Expression
+}
+
+type parseOptions struct {
+	AddressPrefix string
+	SeedVariables map[string]any
 	Subscription  string
-	RootDir       string
-	CandidateMap  map[string]model.Candidate
-	Candidates    []model.Candidate
-	ModuleImports []model.ModuleImport
-	Findings      []model.Finding
+	EachKey       string
+	EachValue     any
 }
 
 // ParseDirectory extracts static Terraform intent from .tf files.
 func ParseDirectory(root string) (*HCLContext, error) {
+	return parseDirectory(root, parseOptions{})
+}
+
+func parseDirectory(root string, opts parseOptions) (*HCLContext, error) {
 	ctx := &HCLContext{
-		Variables:    map[string]any{},
-		Locals:       map[string]any{},
-		RootDir:      root,
-		CandidateMap: map[string]model.Candidate{},
-		Findings:     []model.Finding{},
+		Variables:           cloneAnyMap(opts.SeedVariables),
+		Locals:              map[string]any{},
+		Subscription:        opts.Subscription,
+		RootDir:             root,
+		AddressPrefix:       opts.AddressPrefix,
+		EachKey:             opts.EachKey,
+		EachValue:           opts.EachValue,
+		CandidateMap:        map[string]model.Candidate{},
+		TraversalCandidates: map[string]model.Candidate{},
+		Findings:            []model.Finding{},
 	}
 
-	files := []string{}
-	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if d.Name() == ".terraform" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if strings.HasSuffix(path, ".tf") {
-			files = append(files, path)
-		}
-		return nil
-	}); err != nil {
+	entries, err := os.ReadDir(root)
+	if err != nil {
 		return nil, err
+	}
+	files := []string{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(entry.Name(), ".tf") {
+			files = append(files, filepath.Join(root, entry.Name()))
+		}
 	}
 
 	p := hclparse.NewParser()
@@ -85,6 +109,9 @@ func ParseDirectory(root string) (*HCLContext, error) {
 	}
 
 	validateModuleImports(ctx)
+	if err := mergeLocalModuleCandidates(ctx); err != nil {
+		return nil, err
+	}
 
 	for _, c := range ctx.CandidateMap {
 		ctx.Candidates = append(ctx.Candidates, c)
@@ -99,6 +126,9 @@ func parseVariables(content *hcl.BodyContent, ctx *HCLContext) {
 			continue
 		}
 		name := b.Labels[0]
+		if _, exists := ctx.Variables[name]; exists {
+			continue
+		}
 		content, _, _ := b.Body.PartialContent(&hcl.BodySchema{
 			Attributes: []hcl.AttributeSchema{
 				{Name: "default"},
@@ -148,7 +178,7 @@ func parseProvider(content *hcl.BodyContent, ctx *HCLContext) {
 		if attr, ok := content.Attributes["subscription_id"]; ok {
 			if val, ok := evalExpression(attr.Expr, ctx); ok {
 				if s, ok := toString(val); ok {
-					ctx.Subscription = s
+					setContextSubscription(ctx, s)
 				}
 			}
 		}
@@ -161,24 +191,26 @@ func parseModules(content *hcl.BodyContent, ctx *HCLContext, filePath string) {
 			continue
 		}
 		name := b.Labels[0]
-		content, _, _ := b.Body.PartialContent(&hcl.BodySchema{
-			Attributes: []hcl.AttributeSchema{
-				{Name: "source"},
-			},
-		})
-		if content == nil {
+		attrs, diags := b.Body.JustAttributes()
+		if diags.HasErrors() || len(attrs) == 0 {
 			continue
 		}
 		mod := model.ModuleImport{
 			Name: name,
 			File: filePath,
 		}
-		if attr, ok := content.Attributes["source"]; ok {
+		if attr, ok := attrs["source"]; ok {
 			if v, ok := evalExpression(attr.Expr, ctx); ok {
 				if s, ok := toString(v); ok {
 					mod.Source = strings.TrimSpace(s)
 					mod.SourceKind = classifyModuleSource(mod.Source)
 					ctx.ModuleImports = append(ctx.ModuleImports, mod)
+					ctx.ModuleCalls = append(ctx.ModuleCalls, moduleCall{
+						ImportIndex: len(ctx.ModuleImports) - 1,
+						Name:        name,
+						File:        filePath,
+						Attributes:  attributeExpressions(attrs),
+					})
 					continue
 				}
 			}
@@ -338,13 +370,15 @@ func dirExists(path string) bool {
 }
 
 func parseResources(content *hcl.BodyContent, ctx *HCLContext) {
-	for _, b := range content.Blocks.OfType("resource") {
+	blocks := content.Blocks.OfType("resource")
+	for _, b := range blocks {
 		if len(b.Labels) != 2 {
 			continue
 		}
 		resourceType := b.Labels[0]
 		resourceName := b.Labels[1]
-		addr := resourceType + "." + resourceName
+		localAddr := resourceType + "." + resourceName
+		addr := qualifyTerraformAddress(ctx.AddressPrefix, localAddr)
 
 		cand := model.Candidate{
 			Address:         addr,
@@ -352,23 +386,50 @@ func parseResources(content *hcl.BodyContent, ctx *HCLContext) {
 			Mode:            "managed",
 			Action:          "config",
 			Source:          "hcl",
+			SubscriptionID:  ctx.Subscription,
 			RawRestrictions: map[string]any{},
 		}
+		ctx.CandidateMap[addr] = cand
+		ctx.TraversalCandidates[localAddr] = cand
+	}
 
-		blockContent, _, _ := b.Body.PartialContent(&hcl.BodySchema{
-			Attributes: []hcl.AttributeSchema{
-				{Name: "location"},
-				{Name: "name"},
-				{Name: "profile_id"},
-				{Name: "profile_name"},
-				{Name: "resource_group_name"},
-				{Name: "virtual_network_name"},
-				{Name: "sku"},
-			},
-		})
-		if blockContent == nil {
-			continue
+	for pass := 0; pass < 3; pass++ {
+		for _, b := range blocks {
+			enrichResourceCandidate(b, ctx)
 		}
+	}
+}
+
+func enrichResourceCandidate(b *hcl.Block, ctx *HCLContext) {
+	if len(b.Labels) != 2 {
+		return
+	}
+	resourceType := b.Labels[0]
+	resourceName := b.Labels[1]
+	localAddr := resourceType + "." + resourceName
+	addr := qualifyTerraformAddress(ctx.AddressPrefix, localAddr)
+
+	cand, ok := ctx.CandidateMap[addr]
+	if !ok {
+		return
+	}
+	if cand.SubscriptionID == "" {
+		cand.SubscriptionID = ctx.Subscription
+	}
+	cand.RawRestrictions = map[string]any{}
+
+	blockContent, _, _ := b.Body.PartialContent(&hcl.BodySchema{
+		Attributes: []hcl.AttributeSchema{
+			{Name: "location"},
+			{Name: "name"},
+			{Name: "profile_id"},
+			{Name: "profile_name"},
+			{Name: "resource_group_name"},
+			{Name: "virtual_network_name"},
+			{Name: "sku"},
+		},
+	})
+	if blockContent != nil {
 		if v, ok := blockContent.Attributes["location"]; ok {
 			if val, ok := evalExpression(v.Expr, ctx); ok {
 				if s, ok := toString(val); ok {
@@ -421,10 +482,11 @@ func parseResources(content *hcl.BodyContent, ctx *HCLContext) {
 				}
 			}
 		}
-
-		parseRestrictionsFromBody(b.Body, cand.RawRestrictions, ctx)
-		ctx.CandidateMap[addr] = cand
 	}
+
+	parseRestrictionsFromBody(b.Body, cand.RawRestrictions, ctx)
+	ctx.CandidateMap[addr] = cand
+	ctx.TraversalCandidates[localAddr] = cand
 }
 
 func parseRestrictionsFromBody(body hcl.Body, store map[string]any, ctx *HCLContext) {
@@ -459,6 +521,61 @@ func appendAsInterfaceSlice(existing any, newEntry any) []any {
 		return append(list, newEntry)
 	}
 	return []any{existing, newEntry}
+}
+
+func attributeExpressions(attrs map[string]*hcl.Attribute) map[string]hcl.Expression {
+	out := make(map[string]hcl.Expression, len(attrs))
+	for name, attr := range attrs {
+		out[name] = attr.Expr
+	}
+	return out
+}
+
+func qualifyTerraformAddress(prefix, addr string) string {
+	if strings.TrimSpace(prefix) == "" {
+		return addr
+	}
+	return prefix + "." + addr
+}
+
+func qualifyModulePrefix(prefix, moduleName, key string) string {
+	moduleAddr := "module." + moduleName
+	if strings.TrimSpace(key) != "" {
+		moduleAddr += fmt.Sprintf("[%q]", key)
+	}
+	return qualifyTerraformAddress(prefix, moduleAddr)
+}
+
+func cloneAnyMap(in map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func setContextSubscription(ctx *HCLContext, subscription string) {
+	if ctx == nil {
+		return
+	}
+	ctx.Subscription = strings.TrimSpace(subscription)
+	if ctx.Subscription == "" {
+		return
+	}
+	for address, candidate := range ctx.CandidateMap {
+		if candidate.SubscriptionID != "" {
+			continue
+		}
+		candidate.SubscriptionID = ctx.Subscription
+		ctx.CandidateMap[address] = candidate
+	}
+	for address, candidate := range ctx.TraversalCandidates {
+		if candidate.SubscriptionID != "" {
+			continue
+		}
+		candidate.SubscriptionID = ctx.Subscription
+		ctx.TraversalCandidates[address] = candidate
+	}
 }
 
 func evalExpression(expr hcl.Expression, ctx *HCLContext) (any, bool) {
@@ -539,6 +656,16 @@ func evalExpression(expr hcl.Expression, ctx *HCLContext) (any, bool) {
 			}
 		}
 		return obj, true
+	case *hclsyntax.ObjectConsKeyExpr:
+		if tr, ok := v.Wrapped.(*hclsyntax.ScopeTraversalExpr); ok {
+			split := tr.Traversal.SimpleSplit()
+			if len(split.Abs) == 1 && len(split.Rel) == 0 {
+				if root, ok := split.Abs[0].(hcl.TraverseRoot); ok {
+					return root.Name, true
+				}
+			}
+		}
+		return evalExpression(v.Wrapped, ctx)
 	}
 	return nil, false
 }
@@ -659,14 +786,90 @@ func resolveTraversal(expr *hclsyntax.ScopeTraversalExpr, ctx *HCLContext) (any,
 	switch root {
 	case "var":
 		if val, ok := ctx.Variables[key]; ok {
-			return val, true
+			return traverseResolvedValue(val, parts[2:])
 		}
 	case "local":
 		if val, ok := ctx.Locals[key]; ok {
-			return val, true
+			return traverseResolvedValue(val, parts[2:])
+		}
+	case "each":
+		switch key {
+		case "key":
+			return traverseResolvedValue(ctx.EachKey, parts[2:])
+		case "value":
+			return traverseResolvedValue(ctx.EachValue, parts[2:])
 		}
 	}
-	return nil, false
+	return resolveResourceTraversal(parts, ctx)
+}
+
+func resolveResourceTraversal(parts []string, ctx *HCLContext) (any, bool) {
+	if ctx == nil || len(parts) < 2 {
+		return nil, false
+	}
+	candidate, ok := ctx.TraversalCandidates[parts[0]+"."+parts[1]]
+	if !ok {
+		return nil, false
+	}
+	if len(parts) == 2 {
+		return candidate, true
+	}
+	return candidateTraversalValue(candidate, parts[2:])
+}
+
+func candidateTraversalValue(candidate model.Candidate, attrs []string) (any, bool) {
+	if len(attrs) == 0 {
+		return candidate, true
+	}
+
+	var value any
+	switch attrs[0] {
+	case "name":
+		value = candidate.Name
+	case "location":
+		value = candidate.Location
+	case "resource_group_name":
+		value = candidate.ResourceGroup
+	case "virtual_network_name":
+		value = candidate.VirtualNetwork
+	case "traffic_manager_profile", "profile_name":
+		value = candidate.TrafficManagerProfile
+	case "id":
+		id, ok := buildCandidateResourceID(candidate)
+		if !ok {
+			return nil, false
+		}
+		value = id
+	default:
+		return nil, false
+	}
+	return traverseResolvedValue(value, attrs[1:])
+}
+
+func traverseResolvedValue(value any, attrs []string) (any, bool) {
+	current := value
+	if len(attrs) == 0 {
+		if current == nil {
+			return nil, false
+		}
+		return current, true
+	}
+	for _, attr := range attrs {
+		switch typed := current.(type) {
+		case map[string]any:
+			next, ok := typed[attr]
+			if !ok {
+				return nil, false
+			}
+			current = next
+		default:
+			return nil, false
+		}
+	}
+	if current == nil {
+		return nil, false
+	}
+	return current, true
 }
 
 func ctyToGo(v cty.Value) any {

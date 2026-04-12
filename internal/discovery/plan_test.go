@@ -2,6 +2,8 @@ package discovery
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -310,6 +312,139 @@ func TestCandidatesFromPlanParsesTrafficManagerEndpointProfileID(t *testing.T) {
 	}
 	if got := cands[0].TrafficManagerProfile; got != "tm-profile" {
 		t.Fatalf("expected parsed traffic manager profile tm-profile, got %s", got)
+	}
+}
+
+func TestCandidatesFromPlanMergesForEachModuleInstanceFromParsedHCL(t *testing.T) {
+	dir := t.TempDir()
+	moduleDir := filepath.Join(dir, "modules", "web")
+	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`
+locals {
+  apps = {
+    blue = "rg-blue"
+  }
+}
+
+module "web" {
+  for_each            = local.apps
+  source              = "./modules/web"
+  resource_group_name = each.value
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(moduleDir, "main.tf"), []byte(`
+variable "resource_group_name" {}
+
+resource "azurerm_service_plan" "asp" {
+  name                = "asp-web"
+  location            = "westeurope"
+  resource_group_name = var.resource_group_name
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hcl, err := ParseDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cands, err := CandidatesFromPlan(planBlob(t, []map[string]any{
+		{
+			"address": `module.web["blue"].azurerm_service_plan.asp`,
+			"type":    "azurerm_service_plan",
+			"name":    "asp",
+			"mode":    "managed",
+			"change": map[string]any{
+				"actions": []string{"create"},
+				"after": map[string]any{
+					"sku": map[string]any{"name": "B1"},
+				},
+				"after_unknown": map[string]any{},
+			},
+		},
+	}), hcl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cands[0].Source; got != "merged" {
+		t.Fatalf("expected merged source, got %s", got)
+	}
+	if got := cands[0].ResourceGroup; got != "rg-blue" {
+		t.Fatalf("expected merged resource group rg-blue, got %s", got)
+	}
+}
+
+func TestCandidatesFromPlanMergesTrafficManagerEndpointMetadataFromParsedModuleHCL(t *testing.T) {
+	dir := t.TempDir()
+	moduleDir := filepath.Join(dir, "modules", "tm")
+	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`
+provider "azurerm" {
+  subscription_id = "sub-123"
+  features {}
+}
+
+module "tm" {
+  source              = "./modules/tm"
+  resource_group_name = "rg-net"
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(moduleDir, "main.tf"), []byte(`
+variable "resource_group_name" {}
+
+resource "azurerm_traffic_manager_profile" "profile" {
+  name                = "tm-profile"
+  resource_group_name = var.resource_group_name
+}
+
+resource "azurerm_traffic_manager_azure_endpoint" "endpoint" {
+  name       = "endpoint-app"
+  profile_id = azurerm_traffic_manager_profile.profile.id
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hcl, err := ParseDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cands, err := CandidatesFromPlan(planBlob(t, []map[string]any{
+		{
+			"address": "module.tm.azurerm_traffic_manager_azure_endpoint.endpoint",
+			"type":    "azurerm_traffic_manager_azure_endpoint",
+			"name":    "endpoint",
+			"mode":    "managed",
+			"change": map[string]any{
+				"actions": []string{"create"},
+				"after": map[string]any{
+					"name": "endpoint-app",
+				},
+				"after_unknown": map[string]any{},
+			},
+		},
+	}), hcl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cands[0].Source; got != "merged" {
+		t.Fatalf("expected merged source, got %s", got)
+	}
+	if got := cands[0].ResourceGroup; got != "rg-net" {
+		t.Fatalf("expected merged resource group rg-net, got %s", got)
+	}
+	if got := cands[0].TrafficManagerProfile; got != "tm-profile" {
+		t.Fatalf("expected merged traffic manager profile tm-profile, got %s", got)
 	}
 }
 
