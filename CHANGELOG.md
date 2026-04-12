@@ -6,6 +6,7 @@
 - Add module import validation against local `source` paths and root `modules/` directory.
 - Add direct Azure REST behavior metadata (`tf-preflight version`) including query backend and dependency details.
 - Improve install and run guidance for binary installation, including `make install`/`make install-system` and curl bootstrap.
+- Complete remote curl bootstrap commands in docs/installer messaging with concrete upstream repo defaults and fork fallback examples.
 - Add `agents.md` to document engineering standards (SOLID, DevOps/GitOps, TDD, review expectations).
 
 ## 1.0.0

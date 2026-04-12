@@ -44,13 +44,19 @@ From a local clone:
 From a remote URL (after setting the repo):
 
 ```bash
-PRE_FLIGHT_REPO=<owner>/<repo> bash -c 'curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh | bash'
+PRE_FLIGHT_REPO=tf-preflight/tf-preflight bash -c 'curl -fsSL https://raw.githubusercontent.com/tf-preflight/tf-preflight/main/scripts/install.sh | bash'
 ```
 
 You can also pin a versioned release:
 
 ```bash
-PRE_FLIGHT_REPO=<owner>/<repo> PRE_FLIGHT_VERSION=v1.0.0 bash -c 'curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh | bash'
+PRE_FLIGHT_REPO=tf-preflight/tf-preflight PRE_FLIGHT_VERSION=v1.0.0 bash -c 'curl -fsSL https://raw.githubusercontent.com/tf-preflight/tf-preflight/main/scripts/install.sh | bash'
+```
+
+For forks, replace `tf-preflight/tf-preflight` with your GitHub `owner/repo`:
+
+```bash
+PRE_FLIGHT_REPO=<owner>/<repo> bash -c 'curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh | bash'
 ```
 
 ## Command

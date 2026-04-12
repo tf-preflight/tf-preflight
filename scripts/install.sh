@@ -83,5 +83,6 @@ fi
 
 echo "ERROR: unable to install." >&2
 echo "  Run this script from a local clone, or set PRE_FLIGHT_REPO to enable release install." >&2
-echo "  Example: PRE_FLIGHT_REPO=<owner>/<repo> bash <(curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh)" >&2
+echo "  Example: PRE_FLIGHT_REPO=tf-preflight/tf-preflight bash -c 'curl -fsSL https://raw.githubusercontent.com/tf-preflight/tf-preflight/main/scripts/install.sh | bash'" >&2
+echo "  For forks, replace with your GitHub owner/repo." >&2
 exit 1
