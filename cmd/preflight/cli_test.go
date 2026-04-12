@@ -78,6 +78,7 @@ func TestExitCodeForError(t *testing.T) {
 
 func TestResolvePlan_AutoPlanUsesTerraformCommands(t *testing.T) {
 	binDir := t.TempDir()
+	tfDir := t.TempDir()
 	terraformPath := filepath.Join(binDir, "terraform")
 	script := `#!/bin/sh
 set -eu
@@ -101,6 +102,11 @@ case "$cmd" in
     exit 0
     ;;
   show)
+    if [ "${PWD}" != "${EXPECT_TF_DIR}" ]; then
+      printf '%s\n' 'Error: Failed to load plugin schemas' >&2
+      printf '%s\n' 'Failed to obtain provider schema: unavailable provider' >&2
+      exit 1
+    fi
     printf '%s\n' '{"format_version":"1.2","resource_changes":[{"address":"azurerm_resource_group.rg","type":"azurerm_resource_group","mode":"managed","name":"rg","change":{"actions":["create"],"after":{"name":"rg-test","location":"westeurope"},"after_unknown":{}}}]}'
     exit 0
     ;;
@@ -112,10 +118,11 @@ exit 1
 	}
 
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("EXPECT_TF_DIR", tfDir)
 
 	data, planPath, err := resolvePlan(context.Background(), model.CommandOptions{
 		AutoPlan: true,
-	}, t.TempDir())
+	}, tfDir)
 	if err != nil {
 		t.Fatalf("unexpected resolvePlan error: %v", err)
 	}
@@ -124,6 +131,62 @@ exit 1
 	}
 	if !strings.HasSuffix(planPath, ".tfplan") {
 		t.Fatalf("expected terraform plan path, got %s", planPath)
+	}
+}
+
+func TestResolvePlan_AutoPlanSurfacesProviderSchemaLoadFailure(t *testing.T) {
+	binDir := t.TempDir()
+	tfDir := t.TempDir()
+	terraformPath := filepath.Join(binDir, "terraform")
+	script := `#!/bin/sh
+set -eu
+cmd="$1"
+shift
+case "$cmd" in
+  init)
+    exit 0
+    ;;
+  plan)
+    out=""
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "-out" ]; then
+        out="$2"
+        shift 2
+        continue
+      fi
+      shift
+    done
+    : > "$out"
+    exit 0
+    ;;
+  show)
+    printf '%s\n' 'Error: Failed to load plugin schemas' >&2
+    printf '%s\n' 'Failed to obtain provider schema: Could not load the schema for provider registry.terraform.io/hashicorp/azurerm: unavailable provider' >&2
+    exit 1
+    ;;
+esac
+exit 1
+`
+	if err := os.WriteFile(terraformPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("unable to write terraform stub: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, _, err := resolvePlan(context.Background(), model.CommandOptions{
+		AutoPlan: true,
+	}, tfDir)
+	if err == nil {
+		t.Fatal("expected resolvePlan to fail on provider schema load")
+	}
+	if !strings.Contains(err.Error(), "terraform show -json failed") {
+		t.Fatalf("expected terraform show context, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "loading provider schemas") {
+		t.Fatalf("expected provider schema context, got %v", err)
+	}
+	if !strings.Contains(err.Error(), tfDir) {
+		t.Fatalf("expected working directory in error, got %v", err)
 	}
 }
 

@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -227,7 +229,7 @@ func resolvePlan(ctx context.Context, opts model.CommandOptions, tfDir string) (
 		if opts.Verbose {
 			fmt.Fprintf(os.Stdout, "Converting binary plan to JSON: %s\n", p)
 		}
-		return terraformShowJSON(ctx, p, opts.Verbose)
+		return terraformShowJSON(ctx, tfDir, p, opts.Verbose)
 	}
 
 	if opts.Verbose {
@@ -237,7 +239,7 @@ func resolvePlan(ctx context.Context, opts model.CommandOptions, tfDir string) (
 	if err != nil {
 		return nil, "", err
 	}
-	return terraformShowJSON(ctx, planPath, opts.Verbose)
+	return terraformShowJSON(ctx, tfDir, planPath, opts.Verbose)
 }
 
 func runTerraformPlan(ctx context.Context, tfDir string, verbose bool) (string, error) {
@@ -251,20 +253,51 @@ func runTerraformPlan(ctx context.Context, tfDir string, verbose bool) (string, 
 	return planPath, nil
 }
 
-func terraformShowJSON(ctx context.Context, planPath string, verbose bool) ([]byte, string, error) {
+func terraformShowJSON(ctx context.Context, tfDir, planPath string, verbose bool) ([]byte, string, error) {
 	cmd := exec.CommandContext(ctx, "terraform", "show", "-json", planPath)
-	cmd.Dir = filepath.Dir(planPath)
+	cmd.Dir = terraformShowWorkDir(tfDir, planPath)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	if verbose {
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	} else {
+		cmd.Stderr = &stderr
 	}
-	data, err := cmd.Output()
-	if err != nil {
-		return nil, planPath, err
+	if err := cmd.Run(); err != nil {
+		return nil, planPath, formatTerraformShowError(planPath, cmd.Dir, stderr.String(), err)
 	}
+	data := stdout.Bytes()
 	if err := validateTerraformPlanJSON(data); err != nil {
 		return nil, planPath, fmt.Errorf("terraform show output is not a Terraform plan JSON document: %w", err)
 	}
 	return data, planPath, nil
+}
+
+func terraformShowWorkDir(tfDir, planPath string) string {
+	if strings.TrimSpace(tfDir) != "" {
+		return tfDir
+	}
+	return filepath.Dir(planPath)
+}
+
+func formatTerraformShowError(planPath, workDir, stderr string, err error) error {
+	trimmed := strings.TrimSpace(stderr)
+	if isProviderSchemaLoadFailure(trimmed) {
+		return fmt.Errorf("terraform show -json failed for plan %s while loading provider schemas from %s: %s", planPath, workDir, trimmed)
+	}
+	if trimmed != "" {
+		return fmt.Errorf("terraform show -json failed for plan %s in %s: %s", planPath, workDir, trimmed)
+	}
+	return fmt.Errorf("terraform show -json failed for plan %s in %s: %w", planPath, workDir, err)
+}
+
+func isProviderSchemaLoadFailure(stderr string) bool {
+	lower := strings.ToLower(strings.TrimSpace(stderr))
+	return strings.Contains(lower, "failed to load plugin schemas") ||
+		strings.Contains(lower, "failed to obtain provider schema") ||
+		strings.Contains(lower, "provider schema") ||
+		strings.Contains(lower, "unavailable provider")
 }
 
 func execCommand(ctx context.Context, dir string, verbose bool, name string, args ...string) error {
