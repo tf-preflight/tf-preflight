@@ -13,6 +13,8 @@
 - Fix HCL discovery behavior to resolve `var`/`local` expressions and function calls (`format`, `join`, `lower`, `upper`) reliably, including the CLI-preflight plan bootstrap path.
 - Fix bootstrap installer to resolve `latest` to an actual GitHub release tag and fallback to source install when release assets are unavailable.
 - Add interactive scan mode (`--interactive`) with guided module discovery, plan selection, verbose default, module warning filtering, and preflight confirmation before Azure checks.
+- Add pre-run human-readable summary output for text mode in both interactive and non-interactive paths (candidate/type/action breakdown, key candidates, and blocking/optional findings) before Azure checks.
+- Document verification by recording that the complete test suite passes after summary changes.
 
 ## 1.0.0
 

@@ -187,6 +187,14 @@ Run:
 go test ./...
 ```
 
+Latest verification for the pre-run summary enhancement:
+
+```bash
+go test ./...
+```
+
+Result: all packages passed.
+
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](./LICENSE).

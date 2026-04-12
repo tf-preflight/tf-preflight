@@ -188,12 +188,6 @@ func run(opts model.CommandOptions) error {
 	if err != nil {
 		return fmt.Errorf("failed reading plan: %w", err)
 	}
-	if opts.Interactive {
-		if err := confirmInteractiveRun(bufio.NewReader(os.Stdin), os.Stdout, absDir, finalPlanPath, opts, candidates, hclCtx.Findings); err != nil {
-			return err
-		}
-	}
-	progress.Tick("candidate set prepared")
 
 	subscriptionID := opts.SubscriptionID
 	if subscriptionID == "" {
@@ -210,6 +204,18 @@ func run(opts model.CommandOptions) error {
 			candidates[i].SubscriptionID = subscriptionID
 		}
 	}
+
+	if opts.Output == "text" && !opts.Interactive {
+		printPreflightPlanSummary(os.Stdout, absDir, finalPlanPath, firstNonEmptyString(subscriptionID), opts, candidates, hclCtx.Findings)
+	}
+
+	if opts.Interactive {
+		if err := confirmInteractiveRun(bufio.NewReader(os.Stdin), os.Stdout, absDir, finalPlanPath, opts, subscriptionID, candidates, hclCtx.Findings); err != nil {
+			return err
+		}
+	}
+
+	progress.Tick("candidate set prepared")
 	progress.Tick(fmt.Sprintf("resolved %d candidate resource(s)", len(candidates)))
 
 	token, err := resolveAzureToken(opts.Verbose)

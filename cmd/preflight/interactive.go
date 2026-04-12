@@ -16,6 +16,8 @@ import (
 	"github.com/tf-preflight/tf-preflight/internal/model"
 )
 
+const summaryMaxCandidates = 10
+
 func isTTYStdin() bool {
 	stat, err := os.Stdin.Stat()
 	if err != nil {
@@ -259,7 +261,7 @@ func parseIgnoreSelection(raw string, maxIndex int, warnings []model.Finding) (m
 	return ignoreIndexes, ignoreCodes, nil
 }
 
-func confirmInteractiveRun(reader *bufio.Reader, writer io.Writer, tfDir, planPath string, opts model.CommandOptions, candidates []model.Candidate, findings []model.Finding) error {
+func confirmInteractiveRun(reader *bufio.Reader, writer io.Writer, tfDir, planPath string, opts model.CommandOptions, subscriptionID string, candidates []model.Candidate, findings []model.Finding) error {
 	out := writer
 	moduleErrors := 0
 	moduleWarnings := 0
@@ -273,17 +275,14 @@ func confirmInteractiveRun(reader *bufio.Reader, writer io.Writer, tfDir, planPa
 			}
 		}
 	}
-	planSource := planPath
-	if opts.AutoPlan {
-		planSource = "auto-generated terraform plan"
-	}
 
-	fmt.Fprintln(out, "Execution summary:")
-	fmt.Fprintf(out, "  Directory: %s\n", tfDir)
-	fmt.Fprintf(out, "  Plan: %s\n", planSource)
-	fmt.Fprintf(out, "  Candidates: %d\n", len(candidates))
-	fmt.Fprintf(out, "  Module findings kept: %d errors, %d warnings\n", moduleErrors, moduleWarnings)
-	fmt.Fprintf(out, "  Severity threshold: %s\n", opts.SeverityThreshold)
+	if opts.Output == "text" {
+		printPreflightPlanSummary(out, tfDir, planPath, firstNonEmptyString(subscriptionID), opts, candidates, findings)
+		if moduleErrors > 0 || moduleWarnings > 0 {
+			fmt.Fprintf(out, "  Module findings: %d errors, %d warnings\n", moduleErrors, moduleWarnings)
+		}
+		fmt.Fprintf(out, "  Severity threshold: %s\n", opts.SeverityThreshold)
+	}
 
 	ok, err := promptYesNo(reader, out, "Proceed with scan?", true)
 	if err != nil {
@@ -293,6 +292,144 @@ func confirmInteractiveRun(reader *bufio.Reader, writer io.Writer, tfDir, planPa
 		return errInteractiveCancel
 	}
 	return nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return "unknown"
+}
+
+func printPreflightPlanSummary(out io.Writer, tfDir, planPath, resolvedSubscription string, opts model.CommandOptions, candidates []model.Candidate, findings []model.Finding) {
+	planSource := planPath
+	if opts.AutoPlan {
+		planSource = "auto-generated terraform plan"
+	}
+
+	fmt.Fprintln(out, "Preflight execution summary:")
+	fmt.Fprintf(out, "  Directory: %s\n", tfDir)
+	fmt.Fprintf(out, "  Plan: %s\n", planSource)
+	fmt.Fprintf(out, "  Subscription: %s\n", resolvedSubscription)
+	fmt.Fprintf(out, "  Severity threshold: %s\n", opts.SeverityThreshold)
+	fmt.Fprintf(out, "  Candidates: %d\n", len(candidates))
+
+	actionCounts, typeCounts := summarizeCandidateCounts(candidates)
+	fmt.Fprintf(out, "  Action counts: %s\n", renderCounts(actionCounts))
+	fmt.Fprintf(out, "  Resource types: %s\n", renderCounts(typeCounts))
+
+	fmt.Fprintln(out, "  Key candidate preview:")
+	for i, candidate := range candidates {
+		if i >= summaryMaxCandidates {
+			remaining := len(candidates) - summaryMaxCandidates
+			if remaining > 0 {
+				fmt.Fprintf(out, "    ... and %d more candidate(s)\n", remaining)
+			}
+			break
+		}
+
+		tags := candidateWarningTags(candidate)
+		tagText := ""
+		if len(tags) > 0 {
+			tagText = " [" + strings.Join(tags, ", ") + "]"
+		}
+		location := firstNonEmptyString(candidate.Location, "<unknown>")
+		resourceGroup := firstNonEmptyString(candidate.ResourceGroup, "<unknown>")
+		subscription := firstNonEmptyString(candidate.SubscriptionID, resolvedSubscription, "<unknown>")
+		fmt.Fprintf(out, "    %2d) %s (%s, %s) at %s | rg=%s | sub=%s | src=%s%s\n", i+1, candidate.Address, candidate.ResourceType, candidate.Action, location, resourceGroup, subscription, candidate.Source, tagText)
+	}
+
+	errorLines := errorSummaryLines(findings)
+	fmt.Fprintf(out, "  Blocking findings: %d\n", len(errorLines))
+	for _, line := range errorLines {
+		fmt.Fprintf(out, "    - %s\n", line)
+	}
+
+	warnings := warningSummaryLines(findings)
+	if len(warnings) > 0 {
+		show := minInt(len(warnings), 5)
+		fmt.Fprintf(out, "  Optional warnings (showing %d/%d):\n", show, len(warnings))
+		for _, line := range warnings[:show] {
+			fmt.Fprintf(out, "    - %s\n", line)
+		}
+		if len(warnings) > show {
+			fmt.Fprintf(out, "    ... and %d more warning(s)\n", len(warnings)-show)
+		}
+	}
+}
+
+func summarizeCandidateCounts(candidates []model.Candidate) (map[string]int, map[string]int) {
+	actionCounts := map[string]int{}
+	typeCounts := map[string]int{}
+	for _, c := range candidates {
+		actionCounts[c.Action]++
+		typeCounts[c.ResourceType]++
+	}
+	return actionCounts, typeCounts
+}
+
+func renderCounts(counts map[string]int) string {
+	if len(counts) == 0 {
+		return "none"
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", key, counts[key]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func candidateWarningTags(c model.Candidate) []string {
+	tags := []string{}
+	if c.PlanUnknown {
+		tags = append(tags, "plan-unknown")
+	}
+	if len(c.Warnings) > 0 {
+		tags = append(tags, fmt.Sprintf("warnings=%d", len(c.Warnings)))
+	}
+	return tags
+}
+
+func errorSummaryLines(findings []model.Finding) []string {
+	lines := []string{}
+	for _, finding := range findings {
+		if strings.EqualFold(strings.TrimSpace(finding.Severity), "error") {
+			if finding.Resource != "" {
+				lines = append(lines, fmt.Sprintf("%s [%s] %s", finding.Code, finding.Resource, finding.Message))
+			} else {
+				lines = append(lines, fmt.Sprintf("%s: %s", finding.Code, finding.Message))
+			}
+		}
+	}
+	return lines
+}
+
+func warningSummaryLines(findings []model.Finding) []string {
+	lines := []string{}
+	for _, finding := range findings {
+		if strings.EqualFold(strings.TrimSpace(finding.Severity), "warn") {
+			if finding.Resource != "" {
+				lines = append(lines, fmt.Sprintf("%s [%s] %s", finding.Code, finding.Resource, finding.Message))
+			} else {
+				lines = append(lines, fmt.Sprintf("%s: %s", finding.Code, finding.Message))
+			}
+		}
+	}
+	return lines
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func promptChoice(reader *bufio.Reader, writer io.Writer, prompt string, min, max int) (int, error) {
