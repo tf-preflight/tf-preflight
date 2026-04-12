@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 type ResourceMeta struct {
 	Namespace   string
 	ExistsPath  string
+	ImportPath  string
 	QuotaPath   string
 	QuotaChecks []string
 }
@@ -25,35 +27,41 @@ var resourceMeta = map[string]ResourceMeta{
 	"azurerm_resource_group": {
 		Namespace:  "Microsoft.Resources",
 		ExistsPath: "/subscriptions/%s/resourceGroups/%s?api-version=2022-09-01",
+		ImportPath: "/subscriptions/%s/resourceGroups/%s",
 		QuotaPath:  "",
 	},
 	"azurerm_service_plan": {
 		Namespace:   "Microsoft.Web",
 		ExistsPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/serverFarms/%s?api-version=2023-01-01",
+		ImportPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/serverFarms/%s",
 		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Web/locations/%s/usages?api-version=2022-03-01",
 		QuotaChecks: []string{"sites", "total sites", "serverfams"},
 	},
 	"azurerm_windows_web_app": {
 		Namespace:   "Microsoft.Web",
 		ExistsPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s?api-version=2023-01-01",
+		ImportPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s",
 		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Web/locations/%s/usages?api-version=2022-03-01",
 		QuotaChecks: []string{"sites", "total sites", "app service plans"},
 	},
 	"azurerm_linux_web_app": {
 		Namespace:   "Microsoft.Web",
 		ExistsPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s?api-version=2023-01-01",
+		ImportPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s",
 		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Web/locations/%s/usages?api-version=2022-03-01",
 		QuotaChecks: []string{"sites", "total sites", "app service plans"},
 	},
 	"azurerm_traffic_manager_profile": {
 		Namespace:   "Microsoft.Network",
 		ExistsPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/trafficManagerProfiles/%s?api-version=2023-04-01",
+		ImportPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/trafficManagerProfiles/%s",
 		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Network/locations/%s/usages?api-version=2022-01-01",
 		QuotaChecks: []string{"traffic manager profiles"},
 	},
 	"azurerm_mssql_server": {
 		Namespace:   "Microsoft.Sql",
 		ExistsPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Sql/servers/%s?api-version=2023-02-01",
+		ImportPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Sql/servers/%s",
 		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Sql/locations/%s/usages?api-version=2022-02-01",
 		QuotaChecks: []string{"logical servers", "servers"},
 	},
@@ -75,9 +83,79 @@ func ResolveNamespace(resourceType string) (ResourceMeta, bool) {
 	return meta, ok
 }
 
+func BuildExistsPath(candidate model.Candidate) (string, []string, bool) {
+	return buildResourcePath(candidate, true)
+}
+
+func BuildImportID(candidate model.Candidate) (string, []string, bool) {
+	return buildResourcePath(candidate, false)
+}
+
+func buildResourcePath(candidate model.Candidate, escaped bool) (string, []string, bool) {
+	meta, ok := ResolveNamespace(candidate.ResourceType)
+	if !ok {
+		return "", nil, false
+	}
+
+	template := meta.ImportPath
+	if escaped {
+		template = meta.ExistsPath
+	}
+	if template == "" {
+		return "", nil, false
+	}
+
+	value := func(raw string) string {
+		if !escaped {
+			return raw
+		}
+		return url.PathEscape(raw)
+	}
+
+	switch candidate.ResourceType {
+	case "azurerm_resource_group":
+		missing := missingFields(map[string]string{
+			"subscription_id": candidate.SubscriptionID,
+			"name":            candidate.Name,
+		})
+		if len(missing) > 0 {
+			return "", missing, true
+		}
+		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.Name)), nil, true
+	case "azurerm_service_plan",
+		"azurerm_windows_web_app",
+		"azurerm_linux_web_app",
+		"azurerm_traffic_manager_profile",
+		"azurerm_mssql_server":
+		missing := missingFields(map[string]string{
+			"subscription_id": candidate.SubscriptionID,
+			"resource_group":  candidate.ResourceGroup,
+			"name":            candidate.Name,
+		})
+		if len(missing) > 0 {
+			return "", missing, true
+		}
+		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.ResourceGroup), value(candidate.Name)), nil, true
+	default:
+		return "", nil, false
+	}
+}
+
+func missingFields(required map[string]string) []string {
+	missing := make([]string, 0, len(required))
+	for field, value := range required {
+		if strings.TrimSpace(value) == "" {
+			missing = append(missing, field)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
 type AzureClient struct {
 	HTTPClient *http.Client
 	Token      string
+	BaseURL    string
 }
 
 type locationResponse struct {
@@ -102,19 +180,38 @@ type usageResponse struct {
 }
 
 func NewAzureClient(token string) *AzureClient {
-	return &AzureClient{HTTPClient: &http.Client{Timeout: 20 * time.Second}, Token: token}
+	return &AzureClient{
+		HTTPClient: &http.Client{Timeout: 20 * time.Second},
+		Token:      token,
+		BaseURL:    "https://management.azure.com",
+	}
 }
 
-func (c *AzureClient) callJSON(ctx context.Context, method, path string, out any) error {
-	url := "https://management.azure.com" + path
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+func (c *AzureClient) baseURL() string {
+	if strings.TrimSpace(c.BaseURL) == "" {
+		return "https://management.azure.com"
+	}
+	return strings.TrimRight(c.BaseURL, "/")
+}
+
+func (c *AzureClient) doRequest(ctx context.Context, method, path string) (*http.Response, error) {
+	requestURL := c.baseURL() + path
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.Token))
 	req.Header.Set("Accept", "application/json")
 
 	res, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (c *AzureClient) callJSON(ctx context.Context, method, path string, out any) error {
+	res, err := c.doRequest(ctx, method, path)
 	if err != nil {
 		return err
 	}
@@ -130,6 +227,19 @@ func (c *AzureClient) callJSON(ctx context.Context, method, path string, out any
 		return nil
 	}
 	return json.NewDecoder(res.Body).Decode(out)
+}
+
+func (c *AzureClient) ProbePath(ctx context.Context, method, path string) (int, error) {
+	res, err := c.doRequest(ctx, method, path)
+	if err != nil {
+		return 0, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode == 401 || res.StatusCode == 403 {
+		return res.StatusCode, fmt.Errorf("azure unauthorized (check login or token)")
+	}
+	return res.StatusCode, nil
 }
 
 func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureClient, subscriptionID string, threshold string, progress *ui.Progress) ([]model.Finding, error) {
@@ -190,9 +300,8 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 		providers[meta.Namespace] = struct{}{}
 
 		if candidate.Action == "create" || candidate.Action == "update" || candidate.Action == "replace" {
-			if candidate.ResourceGroup != "" && candidate.Name != "" && meta.ExistsPath != "" {
-				path := fmt.Sprintf(meta.ExistsPath, candidate.SubscriptionID, url.PathEscape(candidate.ResourceGroup), url.PathEscape(candidate.Name))
-				if err := client.callJSON(ctx, "GET", path, &struct{}{}); err == nil {
+			if path, missing, ok := BuildExistsPath(candidate); ok && len(missing) == 0 {
+				if status, err := client.ProbePath(ctx, "GET", path); err == nil && status >= 200 && status < 300 {
 					findings = append(findings, model.Finding{Severity: "warn", Code: "RESOURCE_EXISTS", Message: "resource already exists", Resource: candidate.Address})
 				}
 			}

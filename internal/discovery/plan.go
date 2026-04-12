@@ -27,6 +27,7 @@ type planResource struct {
 type planChange struct {
 	Address string         `json:"address"`
 	Type    string         `json:"type"`
+	Mode    string         `json:"mode"`
 	Name    string         `json:"name"`
 	Change  planChangeBody `json:"change"`
 }
@@ -60,6 +61,7 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 		base := model.Candidate{
 			Address:         item.Address,
 			ResourceType:    item.Type,
+			Mode:            item.Mode,
 			Name:            item.Name,
 			Action:          classifyActions(item.Change.Actions),
 			Source:          "plan",
@@ -124,6 +126,7 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 			base := model.Candidate{
 				Address:         item.Address,
 				ResourceType:    item.Type,
+				Mode:            item.Mode,
 				Name:            item.Name,
 				Action:          "noop",
 				Source:          "plan",

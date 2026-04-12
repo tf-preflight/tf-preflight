@@ -349,6 +349,7 @@ func parseResources(content *hcl.BodyContent, ctx *HCLContext) {
 		cand := model.Candidate{
 			Address:         addr,
 			ResourceType:    resourceType,
+			Mode:            "managed",
 			Action:          "config",
 			Source:          "hcl",
 			RawRestrictions: map[string]any{},

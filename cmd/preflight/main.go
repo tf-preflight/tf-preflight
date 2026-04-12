@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,6 +32,7 @@ var (
 var cliUsage = `
 Usage:
   tf-preflight scan --tf-dir <path> [--plan <plan-path> | --auto-plan | --interactive]
+  tf-preflight reconcile --tf-dir <path> [--plan <plan-path> | --auto-plan]
   tf-preflight version
 
 Flags:
@@ -62,86 +62,35 @@ func main() {
 		printVersion()
 		return
 	case "scan":
-		// continue
+		opts, err := parseScanOptions(os.Args[2:])
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(exitCodeForError(err))
+		}
+		if err := runScan(opts); err != nil {
+			if errors.Is(err, errUsage) || errors.Is(err, errInteractiveCancel) {
+				fmt.Println(err)
+			} else {
+				fmt.Println(err)
+			}
+			os.Exit(exitCodeForError(err))
+		}
+		return
+	case "reconcile":
+		opts, err := parseReconcileOptions(os.Args[2:])
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(exitCodeForError(err))
+		}
+		if err := runReconcile(opts); err != nil {
+			fmt.Println(err)
+			os.Exit(exitCodeForError(err))
+		}
+		return
 	default:
 		fmt.Printf("unknown command: %s\n", os.Args[1])
 		fmt.Println(cliUsage)
 		os.Exit(2)
-	}
-
-	fs := flag.NewFlagSet("scan", flag.ExitOnError)
-	tfDir := fs.String("tf-dir", "", "Terraform directory")
-	planPath := fs.String("plan", "", "Terraform plan file")
-	autoPlan := fs.Bool("auto-plan", false, "Generate plan automatically")
-	interactive := fs.Bool("interactive", false, "Run guided interactive scan flow")
-	subscription := fs.String("subscription-id", "", "Subscription override")
-	threshold := fs.String("severity-threshold", "error", "warn or error")
-	output := fs.String("output", "text", "text|json")
-	reportPath := fs.String("report-path", "", "Where to write JSON output")
-	verbose := fs.Bool("verbose", false, "Print detailed runtime output")
-	verboseSet := false
-	_ = fs.Parse(os.Args[2:])
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "verbose" {
-			verboseSet = true
-		}
-	})
-
-	if *interactive && !verboseSet {
-		*verbose = true
-	}
-
-	if *interactive {
-		if !isTTYStdin() {
-			fmt.Println("Cannot run --interactive without a TTY stdin. Use --plan or --auto-plan with the non-interactive mode.")
-			os.Exit(2)
-		}
-		if *tfDir == "" {
-			*tfDir = "."
-		}
-	}
-
-	if *tfDir == "" {
-		fmt.Println("--tf-dir is required unless --interactive is enabled")
-		os.Exit(2)
-	}
-	if !*interactive && !*autoPlan && *planPath == "" {
-		fmt.Println("--plan or --auto-plan is required when not using --interactive")
-		os.Exit(2)
-	}
-	if *threshold != "warn" && *threshold != "error" {
-		fmt.Println("--severity-threshold must be warn or error")
-		os.Exit(2)
-	}
-	if *output != "text" && *output != "json" {
-		fmt.Println("--output must be text or json")
-		os.Exit(2)
-	}
-
-	if err := run(model.CommandOptions{
-		TfDir:             *tfDir,
-		PlanPath:          *planPath,
-		AutoPlan:          *autoPlan,
-		Interactive:       *interactive,
-		SubscriptionID:    *subscription,
-		SeverityThreshold: *threshold,
-		Output:            *output,
-		ReportPath:        *reportPath,
-		Verbose:           *verbose,
-	}); err != nil {
-		if errors.Is(err, errChecksFailed) {
-			os.Exit(1)
-		}
-		if errors.Is(err, errUsage) {
-			fmt.Println(err)
-			os.Exit(2)
-		}
-		if errors.Is(err, errInteractiveCancel) {
-			fmt.Println(err)
-			os.Exit(2)
-		}
-		fmt.Println(err)
-		os.Exit(1)
 	}
 }
 
@@ -149,7 +98,7 @@ var errUsage = errors.New("invalid command usage")
 var errChecksFailed = errors.New("checks failed")
 var errInteractiveCancel = errors.New("interactive scan cancelled")
 
-func run(opts model.CommandOptions) error {
+func runScan(opts model.CommandOptions) error {
 	ctx := context.Background()
 	progress := ui.NewProgress(opts.Output == "text", opts.Verbose, os.Stdout)
 	progress.Start("preparing workspace", 1)
@@ -189,16 +138,7 @@ func run(opts model.CommandOptions) error {
 		return fmt.Errorf("failed reading plan: %w", err)
 	}
 
-	subscriptionID := opts.SubscriptionID
-	if subscriptionID == "" {
-		subscriptionID = hclCtx.Subscription
-	}
-	if subscriptionID == "" {
-		subscriptionID = strings.TrimSpace(os.Getenv("ARM_SUBSCRIPTION_ID"))
-	}
-	if subscriptionID == "" {
-		subscriptionID = strings.TrimSpace(os.Getenv("AZURE_SUBSCRIPTION_ID"))
-	}
+	subscriptionID := resolveSubscriptionID(opts, hclCtx)
 	for i := range candidates {
 		if candidates[i].SubscriptionID == "" {
 			candidates[i].SubscriptionID = subscriptionID

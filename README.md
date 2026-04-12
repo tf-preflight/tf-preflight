@@ -70,6 +70,10 @@ PRE_FLIGHT_REPO=<owner>/<repo> bash -c 'curl -fsSL https://raw.githubusercontent
 ## Command
 
 ```bash
+# Detect import gaps before preflight
+./scripts/tf-preflight reconcile --tf-dir /path/to/task06 --plan /path/to/plan.json
+./scripts/tf-preflight reconcile --tf-dir /path/to/task06 --auto-plan
+
 # Either use a binary plan OR auto-plan mode
 ./scripts/tf-preflight scan --tf-dir /path/to/task06 --plan /path/to/plan.json
 ./scripts/tf-preflight scan --tf-dir /path/to/task06 --auto-plan
@@ -83,15 +87,51 @@ PRE_FLIGHT_REPO=<owner>/<repo> bash -c 'curl -fsSL https://raw.githubusercontent
 
 ### Options
 
-- `--tf-dir` required
-- `--plan` optional path to a Terraform plan (JSON or binary `.tfplan`)
-- `--auto-plan` when plan path is not supplied
-- `--interactive` run guided interactive prompt flow (directory defaults to `.` when omitted)
-- `--subscription-id` optional override
-- `--severity-threshold` `warn|error` (default: `error`)
-- `--output` `text|json` (default: `text`)
-- `--report-path` optional report artifact path
-- `--verbose` enables streaming output by default in interactive mode and detailed command output
+- `reconcile`:
+  - `--tf-dir` required
+  - `--plan` optional path to a Terraform plan (JSON or binary `.tfplan`)
+  - `--auto-plan` when plan path is not supplied
+  - `--subscription-id` optional override
+  - `--output` `text|json` (default: `text`)
+  - `--report-path` optional report artifact path
+  - `--verbose` prints detailed runtime output
+- `scan`:
+  - `--tf-dir` required
+  - `--plan` optional path to a Terraform plan (JSON or binary `.tfplan`)
+  - `--auto-plan` when plan path is not supplied
+  - `--interactive` run guided interactive prompt flow (directory defaults to `.` when omitted)
+  - `--subscription-id` optional override
+  - `--severity-threshold` `warn|error` (default: `error`)
+  - `--output` `text|json` (default: `text`)
+  - `--report-path` optional report artifact path
+  - `--verbose` enables streaming output by default in interactive mode and detailed command output
+
+## Reconcile import gaps
+
+`tf-preflight reconcile` is a read-only stage that looks for Terraform resources
+planned for `create` that already exist in Azure and should be imported before
+running preflight.
+
+Current v1 behavior:
+
+- evaluates managed resources with `create` actions only
+- supports import recommendations for:
+  - `azurerm_resource_group`
+  - `azurerm_service_plan`
+  - `azurerm_windows_web_app`
+  - `azurerm_linux_web_app`
+  - `azurerm_traffic_manager_profile`
+  - `azurerm_mssql_server`
+- reports `IMPORT_REQUIRED` when a matching Azure resource already exists
+- never runs `terraform import` itself
+
+Recommended workflow:
+
+1. Run `tf-preflight reconcile`.
+2. Run the printed `terraform import` commands manually.
+3. Re-run `terraform plan`.
+4. Run `tf-preflight scan`.
+5. Run `terraform apply`.
 
 ## What it checks
 
@@ -123,6 +163,10 @@ PRE_FLIGHT_REPO=<owner>/<repo> bash -c 'curl -fsSL https://raw.githubusercontent
 
 ## Exit codes
 
+- `reconcile`:
+  - `0` pass (no import gaps found)
+  - `1` fail (import required / lookup errors)
+  - `2` usage errors (missing flags, unsupported arguments)
 - `0` pass (or no blocking findings for configured threshold)
 - `1` fail (checks failed / execution errors)
 - `2` usage errors (missing flags, unsupported arguments)

@@ -6,6 +6,7 @@ import "time"
 type Candidate struct {
 	Address         string         `json:"address"`
 	ResourceType    string         `json:"resource_type"`
+	Mode            string         `json:"mode,omitempty"`
 	Action          string         `json:"action"`
 	Location        string         `json:"location,omitempty"`
 	SubscriptionID  string         `json:"subscription_id,omitempty"`
@@ -59,6 +60,33 @@ type Summary struct {
 	} `json:"actions"`
 	Errors   int `json:"errors"`
 	Warnings int `json:"warnings"`
+}
+
+type ImportRecommendation struct {
+	TerraformAddress string `json:"terraform_address"`
+	ResourceType     string `json:"resource_type"`
+	ImportID         string `json:"import_id"`
+	WorkingDirectory string `json:"working_directory"`
+	Command          string `json:"command"`
+}
+
+type ReconcileReport struct {
+	GeneratedAt     time.Time              `json:"generated_at"`
+	TfDirectory     string                 `json:"tf_directory"`
+	PlanPath        string                 `json:"plan_path,omitempty"`
+	AutoPlan        bool                   `json:"auto_plan"`
+	Subscription    string                 `json:"subscription"`
+	Summary         ReconcileSummary       `json:"summary"`
+	Findings        []Finding              `json:"findings"`
+	Recommendations []ImportRecommendation `json:"recommendations"`
+}
+
+type ReconcileSummary struct {
+	TotalCandidates     int `json:"total_candidates"`
+	EvaluatedCandidates int `json:"evaluated_candidates"`
+	ImportRequired      int `json:"import_required"`
+	Errors              int `json:"errors"`
+	Warnings            int `json:"warnings"`
 }
 
 // CommandOptions captures CLI controls.

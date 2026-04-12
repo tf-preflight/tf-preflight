@@ -71,7 +71,11 @@ func WriteText(r model.Report) {
 }
 
 func WriteJSON(r model.Report, outPath string) error {
-	data, err := json.MarshalIndent(r, "", "  ")
+	return writeJSONOutput(r, outPath)
+}
+
+func writeJSONOutput(v any, outPath string) error {
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}

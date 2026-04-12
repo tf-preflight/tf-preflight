@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `tf-preflight reconcile` as a read-only import-gap detection stage before `scan`, with exact `terraform import` recommendations for supported Azure resource types.
+- Add dedicated reconcile reporting, JSON output, CLI validation, and tests covering candidate filtering, import ID generation, Azure probe outcomes, and auto-plan execution.
 - Add progress and verbose output in the CLI flow (`tf-preflight scan`) for long-running checks.
 - Add module import validation against local `source` paths and root `modules/` directory.
 - Add direct Azure REST behavior metadata (`tf-preflight version`) including query backend and dependency details.
