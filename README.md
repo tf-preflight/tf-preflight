@@ -41,10 +41,16 @@ From a local clone:
 ./scripts/install.sh
 ```
 
-From a remote URL (after setting the repo):
+From a remote URL (upstream, no env vars required):
 
 ```bash
-PRE_FLIGHT_REPO=tf-preflight/tf-preflight bash -c 'curl -fsSL https://raw.githubusercontent.com/tf-preflight/tf-preflight/main/scripts/install.sh | bash'
+bash -c 'curl -fsSL https://raw.githubusercontent.com/tf-preflight/tf-preflight/main/scripts/install.sh | bash'
+```
+
+From a remote URL (forks with explicit repo):
+
+```bash
+PRE_FLIGHT_REPO=<owner>/<repo> bash -c 'curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh | bash'
 ```
 
 `PRE_FLIGHT_VERSION` defaults to resolving the repository's latest release tag via the GitHub API. If a pinned tag is not provided and release download fails (for example if assets are not published yet), the script falls back to cloning the repository and building from source.

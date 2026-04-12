@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${PRE_FLIGHT_REPO:-}"
+REPO="${PRE_FLIGHT_REPO:-tf-preflight/tf-preflight}"
 VERSION="${PRE_FLIGHT_VERSION:-latest}"
 DEST_DIR="${PRE_FLIGHT_INSTALL_DIR:-${HOME}/.local/bin}"
 BINARY="tf-preflight"
