@@ -6,6 +6,25 @@ VERSION="${PRE_FLIGHT_VERSION:-latest}"
 DEST_DIR="${PRE_FLIGHT_INSTALL_DIR:-${HOME}/.local/bin}"
 BINARY="tf-preflight"
 
+resolve_release_version() {
+  if [ "${VERSION}" != "latest" ]; then
+    printf '%s' "${VERSION}"
+    return 0
+  fi
+
+  local latest_json
+  if ! latest_json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")"; then
+    return 1
+  fi
+  local tag
+  tag="$(printf '%s' "${latest_json}" | sed -n 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  if [ -z "${tag}" ]; then
+    echo "ERROR: unable to resolve latest release for ${REPO}" >&2
+    return 1
+  fi
+  printf '%s' "${tag}"
+}
+
 install_from_source() {
   local src_dir="$1"
   echo "Installing ${BINARY} from source in ${src_dir}..."
@@ -30,7 +49,7 @@ install_from_source() {
 }
 
 install_from_release() {
-  local os arch platform archive_url
+  local os arch platform archive_url release_version
   os="$(uname -s | tr '[:upper:]' '[:lower:]')"
   arch="$(uname -m)"
 
@@ -53,22 +72,43 @@ install_from_release() {
   fi
 
   platform="${os}-${arch}"
-  archive_url="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY}-${platform}.tar.gz"
+  release_version="$(resolve_release_version)"
+  archive_url="https://github.com/${REPO}/releases/download/${release_version}/${BINARY}-${platform}.tar.gz"
+  local tmp_dir
   tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "${tmp_dir}"' EXIT
 
   echo "Downloading release from ${archive_url}"
-  curl -fsSL "${archive_url}" -o "${tmp_dir}/${BINARY}.tar.gz"
+  if ! curl -fsSL "${archive_url}" -o "${tmp_dir}/${BINARY}.tar.gz"; then
+    echo "Release download failed for ${REPO}@${release_version}" >&2
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
   mkdir -p "${tmp_dir}/bin"
   tar -xzf "${tmp_dir}/${BINARY}.tar.gz" -C "${tmp_dir}/bin"
   mkdir -p "${DEST_DIR}"
   install -m 0755 "${tmp_dir}/bin/${BINARY}" "${DEST_DIR}/${BINARY}"
   echo "${BINARY} installed at ${DEST_DIR}/${BINARY}"
+  rm -rf "${tmp_dir}"
 }
 
 if [ -n "${REPO}" ]; then
-  install_from_release
-  exit 0
+  if install_from_release; then
+    exit 0
+  fi
+
+  if command -v git >/dev/null 2>&1; then
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "${tmp_dir}"' EXIT
+    echo "Falling back to source install from https://github.com/${REPO}.git"
+    git clone --depth 1 "https://github.com/${REPO}.git" "${tmp_dir}"
+    install_from_source "${tmp_dir}"
+    rm -rf "${tmp_dir}"
+    trap - EXIT
+    exit 0
+  fi
+
+  echo "ERROR: release install failed and git is unavailable for source fallback." >&2
+  exit 1
 fi
 
 if command -v git >/dev/null 2>&1 && git -C "$(pwd)" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
