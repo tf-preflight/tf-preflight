@@ -74,6 +74,8 @@ PRE_FLIGHT_REPO=<owner>/<repo> bash -c 'curl -fsSL https://raw.githubusercontent
 ./scripts/tf-preflight scan --tf-dir /path/to/task06 --plan /path/to/plan.json
 ./scripts/tf-preflight scan --tf-dir /path/to/task06 --auto-plan
 ./scripts/tf-preflight scan --tf-dir /path/to/task06 --auto-plan --output json --report-path /tmp/report.json
+# Interactive guided mode (current directory)
+./scripts/tf-preflight scan --interactive
 
 # Control CI behavior
 ./scripts/tf-preflight scan --tf-dir /path/to/task06 --auto-plan --severity-threshold warn
@@ -84,10 +86,12 @@ PRE_FLIGHT_REPO=<owner>/<repo> bash -c 'curl -fsSL https://raw.githubusercontent
 - `--tf-dir` required
 - `--plan` optional path to a Terraform plan (JSON or binary `.tfplan`)
 - `--auto-plan` when plan path is not supplied
+- `--interactive` run guided interactive prompt flow (directory defaults to `.` when omitted)
 - `--subscription-id` optional override
 - `--severity-threshold` `warn|error` (default: `error`)
 - `--output` `text|json` (default: `text`)
 - `--report-path` optional report artifact path
+- `--verbose` enables streaming output by default in interactive mode and detailed command output
 
 ## What it checks
 
@@ -122,6 +126,8 @@ PRE_FLIGHT_REPO=<owner>/<repo> bash -c 'curl -fsSL https://raw.githubusercontent
 - `0` pass (or no blocking findings for configured threshold)
 - `1` fail (checks failed / execution errors)
 - `2` usage errors (missing flags, unsupported arguments)
+
+`--interactive` requires a TTY (`stdin` terminal). In automated CI, use explicit `--plan` or `--auto-plan`.
 
 ## Status matrix
 

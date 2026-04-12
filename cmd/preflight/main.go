@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,13 +32,14 @@ var (
 
 var cliUsage = `
 Usage:
-  tf-preflight scan --tf-dir <path> [--plan <plan-path> | --auto-plan]
+  tf-preflight scan --tf-dir <path> [--plan <plan-path> | --auto-plan | --interactive]
   tf-preflight version
 
 Flags:
   --tf-dir            Terraform directory
   --plan              Path to tfplan file (binary .tfplan) or json plan
   --auto-plan         Run terraform init + plan -out internally
+  --interactive       Run guided prompts for directory, plan source, and module findings
   --subscription-id   Optional subscription override
   --severity-threshold warn|error
   --output            text|json
@@ -71,19 +73,40 @@ func main() {
 	tfDir := fs.String("tf-dir", "", "Terraform directory")
 	planPath := fs.String("plan", "", "Terraform plan file")
 	autoPlan := fs.Bool("auto-plan", false, "Generate plan automatically")
+	interactive := fs.Bool("interactive", false, "Run guided interactive scan flow")
 	subscription := fs.String("subscription-id", "", "Subscription override")
 	threshold := fs.String("severity-threshold", "error", "warn or error")
 	output := fs.String("output", "text", "text|json")
 	reportPath := fs.String("report-path", "", "Where to write JSON output")
 	verbose := fs.Bool("verbose", false, "Print detailed runtime output")
+	verboseSet := false
 	_ = fs.Parse(os.Args[2:])
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "verbose" {
+			verboseSet = true
+		}
+	})
+
+	if *interactive && !verboseSet {
+		*verbose = true
+	}
+
+	if *interactive {
+		if !isTTYStdin() {
+			fmt.Println("Cannot run --interactive without a TTY stdin. Use --plan or --auto-plan with the non-interactive mode.")
+			os.Exit(2)
+		}
+		if *tfDir == "" {
+			*tfDir = "."
+		}
+	}
 
 	if *tfDir == "" {
-		fmt.Println("--tf-dir is required")
+		fmt.Println("--tf-dir is required unless --interactive is enabled")
 		os.Exit(2)
 	}
-	if !*autoPlan && *planPath == "" {
-		fmt.Println("--plan or --auto-plan is required")
+	if !*interactive && !*autoPlan && *planPath == "" {
+		fmt.Println("--plan or --auto-plan is required when not using --interactive")
 		os.Exit(2)
 	}
 	if *threshold != "warn" && *threshold != "error" {
@@ -99,6 +122,7 @@ func main() {
 		TfDir:             *tfDir,
 		PlanPath:          *planPath,
 		AutoPlan:          *autoPlan,
+		Interactive:       *interactive,
 		SubscriptionID:    *subscription,
 		SeverityThreshold: *threshold,
 		Output:            *output,
@@ -112,6 +136,10 @@ func main() {
 			fmt.Println(err)
 			os.Exit(2)
 		}
+		if errors.Is(err, errInteractiveCancel) {
+			fmt.Println(err)
+			os.Exit(2)
+		}
 		fmt.Println(err)
 		os.Exit(1)
 	}
@@ -119,6 +147,7 @@ func main() {
 
 var errUsage = errors.New("invalid command usage")
 var errChecksFailed = errors.New("checks failed")
+var errInteractiveCancel = errors.New("interactive scan cancelled")
 
 func run(opts model.CommandOptions) error {
 	ctx := context.Background()
@@ -135,6 +164,15 @@ func run(opts model.CommandOptions) error {
 	if err != nil {
 		return fmt.Errorf("failed parsing HCL: %w", err)
 	}
+	if opts.Interactive {
+		selectedPlanPath, selectedAutoPlan, filteredFindings, err := interactiveConfigFlow(os.Stdin, os.Stdout, absDir, hclCtx)
+		if err != nil {
+			return err
+		}
+		opts.PlanPath = selectedPlanPath
+		opts.AutoPlan = selectedAutoPlan
+		hclCtx.Findings = filteredFindings
+	}
 	if len(hclCtx.Findings) > 0 {
 		progress.Message(fmt.Sprintf("hcl parsing produced %d module validation note(s)", len(hclCtx.Findings)))
 	}
@@ -149,6 +187,11 @@ func run(opts model.CommandOptions) error {
 	candidates, err := discovery.CandidatesFromPlan(planData, hclCtx)
 	if err != nil {
 		return fmt.Errorf("failed reading plan: %w", err)
+	}
+	if opts.Interactive {
+		if err := confirmInteractiveRun(bufio.NewReader(os.Stdin), os.Stdout, absDir, finalPlanPath, opts, candidates, hclCtx.Findings); err != nil {
+			return err
+		}
 	}
 	progress.Tick("candidate set prepared")
 

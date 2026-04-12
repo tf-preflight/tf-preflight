@@ -12,6 +12,7 @@
 - Fix HCL discovery parsing to tolerate nested provider config blocks (for example provider `features`) by using partial content parsing and best-effort extraction.
 - Fix HCL discovery behavior to resolve `var`/`local` expressions and function calls (`format`, `join`, `lower`, `upper`) reliably, including the CLI-preflight plan bootstrap path.
 - Fix bootstrap installer to resolve `latest` to an actual GitHub release tag and fallback to source install when release assets are unavailable.
+- Add interactive scan mode (`--interactive`) with guided module discovery, plan selection, verbose default, module warning filtering, and preflight confirmation before Azure checks.
 
 ## 1.0.0
 

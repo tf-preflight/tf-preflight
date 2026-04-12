@@ -66,6 +66,7 @@ type CommandOptions struct {
 	TfDir             string
 	PlanPath          string
 	AutoPlan          bool
+	Interactive       bool
 	SubscriptionID    string
 	SeverityThreshold string
 	Output            string
