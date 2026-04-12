@@ -63,6 +63,7 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 		}
 		base.Location = firstString(item.Change.After, "location")
 		base.ResourceGroup = firstString(item.Change.After, "resource_group_name")
+		base.VirtualNetwork = firstString(item.Change.After, "virtual_network_name")
 		base.Name = firstString(item.Change.After, "name")
 		if sku := pickNestedString(item.Change.After, "sku", "name"); sku != "" {
 			base.Sku = sku
@@ -84,6 +85,9 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 			}
 			if base.ResourceGroup == "" {
 				base.ResourceGroup = hcl.ResourceGroup
+			}
+			if base.VirtualNetwork == "" {
+				base.VirtualNetwork = hcl.VirtualNetwork
 			}
 			if base.Name == "" {
 				base.Name = hcl.Name
@@ -125,6 +129,7 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 			}
 			base.Location = firstString(item.Values, "location")
 			base.ResourceGroup = firstString(item.Values, "resource_group_name")
+			base.VirtualNetwork = firstString(item.Values, "virtual_network_name")
 			base.Name = firstString(item.Values, "name")
 			base.Sku = pickNestedString(item.Values, "sku", "name")
 			candidates = append(candidates, base)

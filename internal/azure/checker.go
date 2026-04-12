@@ -58,6 +58,16 @@ var resourceMeta = map[string]ResourceMeta{
 		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Network/locations/%s/usages?api-version=2022-01-01",
 		QuotaChecks: []string{"traffic manager profiles"},
 	},
+	"azurerm_virtual_network": {
+		Namespace:  "Microsoft.Network",
+		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s?api-version=2023-09-01",
+		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s",
+	},
+	"azurerm_subnet": {
+		Namespace:  "Microsoft.Network",
+		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s?api-version=2023-09-01",
+		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s",
+	},
 	"azurerm_mssql_server": {
 		Namespace:   "Microsoft.Sql",
 		ExistsPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Sql/servers/%s?api-version=2023-02-01",
@@ -125,6 +135,7 @@ func buildResourcePath(candidate model.Candidate, escaped bool) (string, []strin
 	case "azurerm_service_plan",
 		"azurerm_windows_web_app",
 		"azurerm_linux_web_app",
+		"azurerm_virtual_network",
 		"azurerm_traffic_manager_profile",
 		"azurerm_mssql_server":
 		missing := missingFields(map[string]string{
@@ -136,6 +147,17 @@ func buildResourcePath(candidate model.Candidate, escaped bool) (string, []strin
 			return "", missing, true
 		}
 		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.ResourceGroup), value(candidate.Name)), nil, true
+	case "azurerm_subnet":
+		missing := missingFields(map[string]string{
+			"subscription_id": candidate.SubscriptionID,
+			"resource_group":  candidate.ResourceGroup,
+			"virtual_network": candidate.VirtualNetwork,
+			"name":            candidate.Name,
+		})
+		if len(missing) > 0 {
+			return "", missing, true
+		}
+		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.ResourceGroup), value(candidate.VirtualNetwork), value(candidate.Name)), nil, true
 	default:
 		return "", nil, false
 	}
@@ -293,7 +315,11 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 		}
 		candidate.Namespace = meta.Namespace
 		if candidate.Location == "" {
-			findings = append(findings, model.Finding{Severity: "warn", Code: "MISSING_LOCATION", Message: "resource location is missing", Resource: candidate.Address})
+			if !requiresExplicitLocation(candidate.ResourceType) {
+				// Some resources inherit placement from a parent resource and do not expose a location field.
+			} else {
+				findings = append(findings, model.Finding{Severity: "warn", Code: "MISSING_LOCATION", Message: "resource location is missing", Resource: candidate.Address})
+			}
 		} else if locs != nil && !isLocationAvailable(locs, candidate.Location) {
 			findings = append(findings, model.Finding{Severity: "error", Code: "INVALID_LOCATION", Message: fmt.Sprintf("%s not available in subscription", candidate.Location), Resource: candidate.Address})
 		}
@@ -351,6 +377,15 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 	}
 
 	return findings, nil
+}
+
+func requiresExplicitLocation(resourceType string) bool {
+	switch resourceType {
+	case "azurerm_subnet":
+		return false
+	default:
+		return true
+	}
 }
 
 func runExistenceCheck(ctx context.Context, client *AzureClient, candidate model.Candidate) []model.Finding {

@@ -84,6 +84,27 @@ func TestBuildImportID_SupportedResourceTypes(t *testing.T) {
 			want: "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/sites/app-linux",
 		},
 		{
+			name: "virtual network",
+			candidate: model.Candidate{
+				ResourceType:   "azurerm_virtual_network",
+				SubscriptionID: "sub-123",
+				ResourceGroup:  "rg-net",
+				Name:           "vnet-app",
+			},
+			want: "/subscriptions/sub-123/resourceGroups/rg-net/providers/Microsoft.Network/virtualNetworks/vnet-app",
+		},
+		{
+			name: "subnet",
+			candidate: model.Candidate{
+				ResourceType:   "azurerm_subnet",
+				SubscriptionID: "sub-123",
+				ResourceGroup:  "rg-net",
+				VirtualNetwork: "vnet-app",
+				Name:           "subnet-app",
+			},
+			want: "/subscriptions/sub-123/resourceGroups/rg-net/providers/Microsoft.Network/virtualNetworks/vnet-app/subnets/subnet-app",
+		},
+		{
 			name: "traffic manager",
 			candidate: model.Candidate{
 				ResourceType:   "azurerm_traffic_manager_profile",
@@ -118,6 +139,18 @@ func TestBuildImportID_SupportedResourceTypes(t *testing.T) {
 				t.Fatalf("unexpected import ID: got %q want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveNamespace_SupportsVirtualNetworkAndSubnet(t *testing.T) {
+	for _, resourceType := range []string{"azurerm_virtual_network", "azurerm_subnet"} {
+		meta, ok := ResolveNamespace(resourceType)
+		if !ok {
+			t.Fatalf("expected %s to be mapped", resourceType)
+		}
+		if meta.Namespace != "Microsoft.Network" {
+			t.Fatalf("expected %s namespace to be Microsoft.Network, got %s", resourceType, meta.Namespace)
+		}
 	}
 }
 
@@ -393,6 +426,80 @@ func TestRunChecks_SurfacesIncompleteExistenceMapping(t *testing.T) {
 		SubscriptionID: "sub-123",
 		Name:           "asp-01",
 		Location:       "westeurope",
+	}}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	assertFindingCodes(t, findings, []string{"RESOURCE_EXISTS_CHECK_INCOMPLETE"})
+}
+
+func TestRunChecks_SupportsVirtualNetworkAndSubnet(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-net/providers/Microsoft.Network/virtualNetworks/vnet-app/subnets/subnet-app"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-net/providers/Microsoft.Network/virtualNetworks/vnet-app"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Network"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{
+		{
+			Address:        "azurerm_virtual_network.vnet",
+			ResourceType:   "azurerm_virtual_network",
+			Mode:           "managed",
+			Action:         "create",
+			SubscriptionID: "sub-123",
+			ResourceGroup:  "rg-net",
+			Name:           "vnet-app",
+			Location:       "westeurope",
+		},
+		{
+			Address:        "azurerm_subnet.subnet",
+			ResourceType:   "azurerm_subnet",
+			Mode:           "managed",
+			Action:         "create",
+			SubscriptionID: "sub-123",
+			ResourceGroup:  "rg-net",
+			VirtualNetwork: "vnet-app",
+			Name:           "subnet-app",
+		},
+	}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected no degraded findings for supported vnet/subnet checks, got %+v", findings)
+	}
+}
+
+func TestRunChecks_SurfacesIncompleteSubnetExistenceMapping(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Network"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_subnet.subnet",
+		ResourceType:   "azurerm_subnet",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		ResourceGroup:  "rg-net",
+		Name:           "subnet-app",
 	}}, client, "sub-123", "error", nil)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)

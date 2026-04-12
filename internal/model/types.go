@@ -11,6 +11,7 @@ type Candidate struct {
 	Location        string         `json:"location,omitempty"`
 	SubscriptionID  string         `json:"subscription_id,omitempty"`
 	ResourceGroup   string         `json:"resource_group,omitempty"`
+	VirtualNetwork  string         `json:"virtual_network,omitempty"`
 	Name            string         `json:"name,omitempty"`
 	Sku             string         `json:"sku,omitempty"`
 	Namespace       string         `json:"namespace"`

@@ -240,6 +240,48 @@ func TestCandidatesFromPlanLeavesUnmatchedPlanResourceUnmerged(t *testing.T) {
 	assertCandidateWarningContains(t, cands[0], "no matching HCL resource found for plan address")
 }
 
+func TestCandidatesFromPlanMergesSubnetVirtualNetworkName(t *testing.T) {
+	hcl := &HCLContext{
+		Candidates: []model.Candidate{
+			{
+				Address:        "azurerm_subnet.app",
+				ResourceType:   "azurerm_subnet",
+				Name:           "subnet-app",
+				ResourceGroup:  "rg-app",
+				VirtualNetwork: "vnet-app",
+			},
+		},
+	}
+
+	cands, err := CandidatesFromPlan(planBlob(t, []map[string]any{
+		{
+			"address": "azurerm_subnet.app",
+			"type":    "azurerm_subnet",
+			"name":    "app",
+			"mode":    "managed",
+			"change": map[string]any{
+				"actions": []string{"create"},
+				"after": map[string]any{
+					"name": "subnet-app",
+				},
+				"after_unknown": map[string]any{},
+			},
+		},
+	}), hcl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(cands))
+	}
+	if got := cands[0].VirtualNetwork; got != "vnet-app" {
+		t.Fatalf("expected merged virtual network name, got %s", got)
+	}
+	if got := cands[0].ResourceGroup; got != "rg-app" {
+		t.Fatalf("expected merged resource group, got %s", got)
+	}
+}
+
 func planBlob(t *testing.T, changes []map[string]any) []byte {
 	t.Helper()
 

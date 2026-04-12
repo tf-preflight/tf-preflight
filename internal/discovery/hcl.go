@@ -360,6 +360,7 @@ func parseResources(content *hcl.BodyContent, ctx *HCLContext) {
 				{Name: "location"},
 				{Name: "name"},
 				{Name: "resource_group_name"},
+				{Name: "virtual_network_name"},
 				{Name: "sku"},
 			},
 		})
@@ -384,6 +385,13 @@ func parseResources(content *hcl.BodyContent, ctx *HCLContext) {
 			if val, ok := evalExpression(v.Expr, ctx); ok {
 				if s, ok := toString(val); ok {
 					cand.ResourceGroup = s
+				}
+			}
+		}
+		if v, ok := blockContent.Attributes["virtual_network_name"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					cand.VirtualNetwork = s
 				}
 			}
 		}

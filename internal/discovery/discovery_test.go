@@ -73,3 +73,28 @@ resource "azurerm_resource_group" "rg" {
 		t.Fatalf("expected location eastus, got %s", got)
 	}
 }
+
+func TestParseDirectoryExtractsSubnetVirtualNetworkName(t *testing.T) {
+	dir := t.TempDir()
+	content := `
+resource "azurerm_subnet" "app" {
+  name                 = "subnet-app"
+  resource_group_name  = "rg-app"
+  virtual_network_name = "vnet-app"
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, err := ParseDirectory(dir)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if len(ctx.Candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(ctx.Candidates))
+	}
+	if got := ctx.Candidates[0].VirtualNetwork; got != "vnet-app" {
+		t.Fatalf("expected virtual network vnet-app, got %s", got)
+	}
+}
