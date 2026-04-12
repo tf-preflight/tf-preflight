@@ -1,0 +1,18 @@
+# Terraform / local cache
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+tfplan
+.preflight.tfplan
+.preflight.tfplan.json
+
+# Python cache
+__pycache__/
+*.pyc
+.venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

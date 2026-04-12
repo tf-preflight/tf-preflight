@@ -1,0 +1,702 @@
+package discovery
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclparse"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/zclconf/go-cty/cty"
+
+	"github.com/tf-preflight/tf-preflight/internal/model"
+)
+
+type HCLContext struct {
+	Variables    map[string]any
+	Locals       map[string]any
+	Subscription string
+	RootDir      string
+	CandidateMap map[string]model.Candidate
+	Candidates   []model.Candidate
+	ModuleImports []model.ModuleImport
+	Findings     []model.Finding
+}
+
+// ParseDirectory extracts static Terraform intent from .tf/.tfvars files.
+func ParseDirectory(root string) (*HCLContext, error) {
+	ctx := &HCLContext{
+		Variables:    map[string]any{},
+		Locals:       map[string]any{},
+		RootDir:      root,
+		CandidateMap: map[string]model.Candidate{},
+		Findings:     []model.Finding{},
+	}
+
+	files := []string{}
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".terraform" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".tf") || strings.HasSuffix(path, ".tfvars") {
+			files = append(files, path)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	p := hclparse.NewParser()
+	for _, path := range files {
+		file, diags := p.ParseHCLFile(path)
+		if diags.HasErrors() {
+			return nil, diags
+		}
+
+		blockSchema := &hcl.BodySchema{
+			Blocks: []hcl.BlockHeaderSchema{
+				{Type: "resource", LabelNames: []string{"type", "name"}},
+				{Type: "provider", LabelNames: []string{"name"}},
+				{Type: "variable", LabelNames: []string{"name"}},
+				{Type: "locals"},
+				{Type: "module", LabelNames: []string{"name"}},
+			},
+		}
+		content, _, diags := file.Body.Content(blockSchema)
+		if diags.HasErrors() {
+			return nil, diags
+		}
+
+		parseVariables(content, ctx)
+		parseLocals(content, ctx)
+		parseProvider(content, ctx)
+		parseResources(content, ctx)
+		parseModules(content, ctx, path)
+	}
+
+	validateModuleImports(ctx)
+
+	for _, c := range ctx.CandidateMap {
+		ctx.Candidates = append(ctx.Candidates, c)
+	}
+
+	return ctx, nil
+}
+
+func parseVariables(content *hcl.BodyContent, ctx *HCLContext) {
+	for _, b := range content.Blocks.OfType("variable") {
+		if len(b.Labels) != 1 {
+			continue
+		}
+		name := b.Labels[0]
+		attrs, diags := b.Body.JustAttributes()
+		if diags.HasErrors() {
+			continue
+		}
+		if attr, ok := attrs["default"]; ok {
+			if val, ok := evalExpression(attr.Expr, ctx); ok {
+				ctx.Variables[name] = val
+			}
+		}
+	}
+}
+
+func parseLocals(content *hcl.BodyContent, ctx *HCLContext) {
+	for _, b := range content.Blocks.OfType("locals") {
+		attrs, diags := b.Body.JustAttributes()
+		if diags.HasErrors() {
+			continue
+		}
+		for key, attr := range attrs {
+			if val, ok := evalExpression(attr.Expr, ctx); ok {
+				ctx.Locals[key] = val
+			}
+		}
+	}
+}
+
+func parseProvider(content *hcl.BodyContent, ctx *HCLContext) {
+	for _, b := range content.Blocks.OfType("provider") {
+		if len(b.Labels) != 1 || b.Labels[0] != "azurerm" {
+			continue
+		}
+		attrs, diags := b.Body.JustAttributes()
+		if diags.HasErrors() {
+			continue
+		}
+		if attr, ok := attrs["subscription_id"]; ok {
+			if val, ok := evalExpression(attr.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					ctx.Subscription = s
+				}
+			}
+		}
+	}
+}
+
+func parseModules(content *hcl.BodyContent, ctx *HCLContext, filePath string) {
+	for _, b := range content.Blocks.OfType("module") {
+		if len(b.Labels) != 1 {
+			continue
+		}
+		name := b.Labels[0]
+		attrs, diags := b.Body.JustAttributes()
+		if diags.HasErrors() {
+			continue
+		}
+		mod := model.ModuleImport{
+			Name: name,
+			File: filePath,
+		}
+		if attr, ok := attrs["source"]; ok {
+			if v, ok := evalExpression(attr.Expr, ctx); ok {
+				if s, ok := toString(v); ok {
+					mod.Source = strings.TrimSpace(s)
+					mod.SourceKind = classifyModuleSource(mod.Source)
+					ctx.ModuleImports = append(ctx.ModuleImports, mod)
+					continue
+				}
+			}
+		}
+		ctx.Findings = append(ctx.Findings, model.Finding{
+			Severity: "warn",
+			Code:     "MODULE_SOURCE_UNKNOWN",
+			Message:  fmt.Sprintf("module %q source is dynamic or unsupported and could not be resolved statically", name),
+			Resource: name,
+		})
+	}
+}
+
+func classifyModuleSource(source string) string {
+	switch {
+	case strings.HasPrefix(source, "./") || strings.HasPrefix(source, "../") || strings.HasPrefix(source, "/"):
+		return "local"
+	case strings.HasPrefix(source, "git::") || strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://"):
+		return "remote"
+	case strings.Contains(source, "terraform.io/") || strings.HasPrefix(source, "registry.terraform.io/"):
+		return "registry"
+	default:
+		return "other"
+	}
+}
+
+func validateModuleImports(ctx *HCLContext) {
+	referencedModules := map[string]struct{}{}
+	for idx, m := range ctx.ModuleImports {
+		if m.SourceKind != "local" {
+			continue
+		}
+		if m.Source == "" {
+			ctx.Findings = append(ctx.Findings, model.Finding{
+				Severity: "warn",
+				Code:     "MODULE_SOURCE_EMPTY",
+				Message:  "module " + m.Name + " has empty source",
+				Resource: m.Name,
+			})
+			continue
+		}
+		abs := filepath.Clean(filepath.Join(filepath.Dir(m.File), m.Source))
+		m.ResolvedPath = abs
+		ctx.ModuleImports[idx].ResolvedPath = abs
+
+		info, err := os.Stat(abs)
+		if err != nil {
+			ctx.Findings = append(ctx.Findings, model.Finding{
+				Severity: "error",
+				Code:     "MODULE_SOURCE_NOT_FOUND",
+				Message:  fmt.Sprintf("module %q source path does not exist: %s", m.Name, m.Source),
+				Resource: m.Name,
+				Detail: map[string]any{
+					"source": m.Source,
+					"path":   abs,
+				},
+			})
+			continue
+		}
+		if !info.IsDir() {
+			ctx.Findings = append(ctx.Findings, model.Finding{
+				Severity: "error",
+				Code:     "MODULE_SOURCE_INVALID",
+				Message:  fmt.Sprintf("module %q source is not a directory: %s", m.Name, m.Source),
+				Resource: m.Name,
+				Detail: map[string]any{
+					"source": m.Source,
+					"path":   abs,
+				},
+			})
+			continue
+		}
+
+		referencedModules[abs] = struct{}{}
+
+		hasTF, err := hasTerraformFiles(abs)
+		if err != nil {
+			ctx.Findings = append(ctx.Findings, model.Finding{
+				Severity: "warn",
+				Code:     "MODULE_SOURCE_UNREADABLE",
+				Message:  fmt.Sprintf("could not inspect module source directory for %q: %v", m.Name, err),
+				Resource: m.Name,
+				Detail: map[string]any{
+					"source": m.Source,
+					"path":   abs,
+				},
+			})
+			continue
+		}
+		if !hasTF {
+			ctx.Findings = append(ctx.Findings, model.Finding{
+				Severity: "error",
+				Code:     "MODULE_SOURCE_EMPTY",
+				Message:  fmt.Sprintf("module %q source has no .tf files: %s", m.Name, m.Source),
+				Resource: m.Name,
+				Detail: map[string]any{
+					"source": m.Source,
+					"path":   abs,
+				},
+			})
+		}
+	}
+
+	if modulesDir := filepath.Join(ctx.RootDir, "modules"); dirExists(modulesDir) {
+		entries, err := os.ReadDir(modulesDir)
+		if err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				modulePath := filepath.Join(modulesDir, e.Name())
+				if _, ok := referencedModules[modulePath]; ok {
+					continue
+				}
+				ctx.Findings = append(ctx.Findings, model.Finding{
+					Severity: "warn",
+					Code:     "MODULE_UNUSED_DIR",
+					Message:  fmt.Sprintf("module directory %q exists but no module block imports it", modulePath),
+					Detail: map[string]any{
+						"path": modulePath,
+					},
+				})
+			}
+		}
+	}
+}
+
+func hasTerraformFiles(path string) (bool, error) {
+	err := filepath.WalkDir(path, func(candidate string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".terraform" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(candidate, ".tf") {
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if err == nil {
+		return false, nil
+	}
+	if err == fs.SkipAll {
+		return true, nil
+	}
+	return false, err
+}
+
+func dirExists(path string) bool {
+	if stat, err := os.Stat(path); err == nil && stat.IsDir() {
+		return true
+	}
+	return false
+}
+
+func parseResources(content *hcl.BodyContent, ctx *HCLContext) {
+	for _, b := range content.Blocks.OfType("resource") {
+		if len(b.Labels) != 2 {
+			continue
+		}
+		resourceType := b.Labels[0]
+		resourceName := b.Labels[1]
+		addr := resourceType + "." + resourceName
+
+		cand := model.Candidate{
+			Address:         addr,
+			ResourceType:    resourceType,
+			Action:          "config",
+			Source:          "hcl",
+			RawRestrictions: map[string]any{},
+		}
+
+		attrs, diags := b.Body.JustAttributes()
+		if diags.HasErrors() {
+			continue
+		}
+		if v, ok := attrs["location"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					cand.Location = s
+				}
+			}
+		}
+		if v, ok := attrs["name"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					cand.Name = s
+				}
+			}
+		}
+		if v, ok := attrs["resource_group_name"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					cand.ResourceGroup = s
+				}
+			}
+		}
+		if v, ok := attrs["sku"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := pickSKU(val); ok {
+					cand.Sku = s
+				}
+			}
+		}
+
+		parseRestrictionsFromBody(b.Body, cand.RawRestrictions, ctx)
+		ctx.CandidateMap[addr] = cand
+	}
+}
+
+func parseRestrictionsFromBody(body *hclsyntax.Body, store map[string]any, ctx *HCLContext) {
+	restrictionSchema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "ip_restriction", LabelNames: nil}, {Type: "firewall_rule", LabelNames: nil}}}
+	content, _, diags := body.Content(restrictionSchema)
+	if diags.HasErrors() {
+		return
+	}
+	for _, b := range content.Blocks {
+		attrs, diags := b.Body.JustAttributes()
+		if diags.HasErrors() {
+			continue
+		}
+		entry := map[string]any{}
+		for k, a := range attrs {
+			if v, ok := evalExpression(a.Expr, ctx); ok {
+				entry[k] = v
+			}
+		}
+		if len(entry) > 0 {
+			existing := store[b.Type]
+			store[b.Type] = appendAsInterfaceSlice(existing, entry)
+		}
+	}
+}
+
+func appendAsInterfaceSlice(existing any, newEntry any) []any {
+	if existing == nil {
+		return []any{newEntry}
+	}
+	if list, ok := existing.([]any); ok {
+		return append(list, newEntry)
+	}
+	return []any{existing, newEntry}
+}
+
+func evalExpression(expr hcl.Expression, ctx *HCLContext) (any, bool) {
+	switch v := expr.(type) {
+	case *hclsyntax.LiteralValueExpr:
+		return ctyToGo(v.Val), true
+	case *hclsyntax.TemplateExpr:
+		parts := []string{}
+		for _, p := range v.Parts {
+			if lit, ok := p.(*hclsyntax.LiteralValueExpr); ok {
+				if s, ok := ctyToString(lit.Val); ok {
+					parts = append(parts, s)
+				}
+				continue
+			}
+			if tr, ok := p.(*hclsyntax.TemplateWrapExpr); ok {
+				if val, ok := evalExpression(tr.Wrapped, ctx); ok {
+					if s, ok := toString(val); ok {
+						parts = append(parts, s)
+					}
+				}
+				continue
+			}
+			if tr, ok := p.(*hclsyntax.ScopeTraversalExpr); ok {
+				if val, ok := resolveTraversal(tr, ctx); ok {
+					if s, ok := toString(val); ok {
+						parts = append(parts, s)
+					}
+				}
+				continue
+			}
+			if val, ok := evalExpression(p, ctx); ok {
+				if s, ok := toString(val); ok {
+					parts = append(parts, s)
+				}
+			}
+		}
+		return strings.Join(parts, ""), true
+	case *hclsyntax.ScopeTraversalExpr:
+		return resolveTraversal(v, ctx)
+	case *hclsyntax.FunctionCallExpr:
+		return evalFunction(v, ctx)
+	case *hclsyntax.ParenthesizedExpr:
+		return evalExpression(v.Expression, ctx)
+	case *hclsyntax.BinaryOpExpr:
+		left, lok := evalExpression(v.LHS, ctx)
+		right, rok := evalExpression(v.RHS, ctx)
+		if !lok || !rok {
+			return nil, false
+		}
+		ls, loks := toString(left)
+		rs, roks := toString(right)
+		if loks && roks {
+			return ls + rs, true
+		}
+		return nil, false
+	case *hclsyntax.TupleExpr:
+		items := make([]any, 0, len(v.Exprs))
+		for _, e := range v.Exprs {
+			if val, ok := evalExpression(e, ctx); ok {
+				items = append(items, val)
+			}
+		}
+		return items, true
+	case *hclsyntax.ObjectConsExpr:
+		obj := map[string]any{}
+		for _, item := range v.Items {
+			keyRaw, ok := evalExpression(item.KeyExpr, ctx)
+			if !ok {
+				continue
+			}
+			key, ok := toString(keyRaw)
+			if !ok {
+				continue
+			}
+			if val, ok := evalExpression(item.ValueExpr, ctx); ok {
+				obj[key] = val
+			}
+		}
+		return obj, true
+	}
+	return nil, false
+}
+
+func evalFunction(fn *hclsyntax.FunctionCallExpr, _ *HCLContext) (any, bool) {
+	switch fn.Name {
+	case "format":
+		if len(fn.Args) == 0 {
+			return nil, false
+		}
+		fmtRaw, ok := evalExpression(fn.Args[0], nil)
+		if !ok {
+			return nil, false
+		}
+		pattern, ok := toString(fmtRaw)
+		if !ok {
+			return nil, false
+		}
+		parts := make([]any, 0, len(fn.Args)-1)
+		for _, arg := range fn.Args[1:] {
+			v, ok := evalExpression(arg, nil)
+			if !ok {
+				return nil, false
+			}
+			parts = append(parts, fmtArg(v))
+		}
+		return fmt.Sprintf(pattern, parts...), true
+	case "join":
+		if len(fn.Args) != 2 {
+			return nil, false
+		}
+		sepRaw, ok := evalExpression(fn.Args[0], nil)
+		if !ok {
+			return nil, false
+		}
+		sep, ok := toString(sepRaw)
+		if !ok {
+			return nil, false
+		}
+		vals, ok := evalExpression(fn.Args[1], nil)
+		if !ok {
+			return nil, false
+		}
+		list, ok := vals.([]any)
+		if !ok {
+			return nil, false
+		}
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			if s, ok := toString(item); ok {
+				out = append(out, s)
+			}
+		}
+		return strings.Join(out, sep), true
+	case "lower":
+		if len(fn.Args) != 1 {
+			return nil, false
+		}
+		v, ok := evalExpression(fn.Args[0], nil)
+		if !ok {
+			return nil, false
+		}
+		s, ok := toString(v)
+		if !ok {
+			return nil, false
+		}
+		return strings.ToLower(s), true
+	case "upper":
+		if len(fn.Args) != 1 {
+			return nil, false
+		}
+		v, ok := evalExpression(fn.Args[0], nil)
+		if !ok {
+			return nil, false
+		}
+		s, ok := toString(v)
+		if !ok {
+			return nil, false
+		}
+		return strings.ToUpper(s), true
+	}
+	return nil, false
+}
+
+func fmtArg(v any) any {
+	if s, ok := toString(v); ok {
+		return s
+	}
+	return v
+}
+
+func resolveTraversal(expr *hclsyntax.ScopeTraversalExpr, ctx *HCLContext) (any, bool) {
+	split := expr.Traversal.SimpleSplit()
+	parts := []string{}
+	if len(split.Abs) > 0 {
+		for _, p := range split.Abs {
+			if step, ok := p.(hcl.TraverseAttr); ok {
+				parts = append(parts, step.Name)
+			}
+		}
+	}
+	for _, p := range split.Rel {
+		if step, ok := p.(hcl.TraverseAttr); ok {
+			parts = append(parts, step.Name)
+		}
+	}
+	if len(parts) < 2 {
+		return nil, false
+	}
+	root := parts[0]
+	key := parts[1]
+	if ctx == nil {
+		return nil, false
+	}
+	switch root {
+	case "var":
+		if val, ok := ctx.Variables[key]; ok {
+			return val, true
+		}
+	case "local":
+		if val, ok := ctx.Locals[key]; ok {
+			return val, true
+		}
+	}
+	return nil, false
+}
+
+func ctyToGo(v cty.Value) any {
+	if !v.IsKnown() {
+		return nil
+	}
+	if v.IsNull() {
+		return nil
+	}
+	if v.Type() == cty.String {
+		return v.AsString()
+	}
+	if v.Type() == cty.Number {
+		if f, err := v.AsBigFloat().Float64(); err == nil {
+			return f
+		}
+		return nil
+	}
+	if v.Type() == cty.Bool {
+		return v.True()
+	}
+	if v.Type().IsObjectType() {
+		out := map[string]any{}
+		for k := range v.Type().AttributeTypes() {
+			out[k] = ctyToGo(v.GetAttr(k))
+		}
+		return out
+	}
+	if v.Type().IsTupleType() {
+		items := v.AsValueSlice()
+		vals := make([]any, 0, len(items))
+		for _, it := range items {
+			vals = append(vals, ctyToGo(it))
+		}
+		return vals
+	}
+	return nil
+}
+
+func ctyToString(v cty.Value) (string, bool) {
+	if !v.IsKnown() || !v.Type().Equals(cty.String) || v.IsNull() {
+		return "", false
+	}
+	return v.AsString(), true
+}
+
+func toString(v any) (string, bool) {
+	switch x := v.(type) {
+	case string:
+		return x, true
+	case fmt.Stringer:
+		return x.String(), true
+	case int:
+		return fmt.Sprintf("%d", x), true
+	case int64:
+		return fmt.Sprintf("%d", x), true
+	case float64:
+		return strings.TrimSuffix(strings.TrimSuffix(fmt.Sprintf("%v", x), ".0"), "0."), true
+	case bool:
+		return fmt.Sprintf("%t", x), true
+	}
+	return "", false
+}
+
+func pickSKU(v any) (string, bool) {
+	if s, ok := toString(v); ok {
+		return s, true
+	}
+	if m, ok := v.(map[string]any); ok {
+		for _, k := range []string{"name", "tier", "size"} {
+			if val, ok := m[k]; ok {
+				if s, ok := toString(val); ok {
+					return s, true
+				}
+			}
+		}
+	}
+	if list, ok := v.([]any); ok {
+		for _, x := range list {
+			if s, ok := pickSKU(x); ok {
+				return s, true
+			}
+		}
+	}
+	return "", false
+}
