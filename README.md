@@ -73,18 +73,18 @@ PRE_FLIGHT_REPO=<owner>/<repo> bash -c 'curl -fsSL https://raw.githubusercontent
 
 ```bash
 # Detect import gaps before preflight
-./scripts/tf-preflight reconcile --tf-dir /path/to/task06 --plan /path/to/plan.json
-./scripts/tf-preflight reconcile --tf-dir /path/to/task06 --auto-plan
+./scripts/tf-preflight reconcile --tf-dir /path/to/module --plan /path/to/plan.json
+./scripts/tf-preflight reconcile --tf-dir /path/to/module --auto-plan
 
 # Either use a binary plan OR auto-plan mode
-./scripts/tf-preflight scan --tf-dir /path/to/task06 --plan /path/to/plan.json
-./scripts/tf-preflight scan --tf-dir /path/to/task06 --auto-plan
-./scripts/tf-preflight scan --tf-dir /path/to/task06 --auto-plan --output json --report-path /tmp/report.json
+./scripts/tf-preflight scan --tf-dir /path/to/module --plan /path/to/plan.json
+./scripts/tf-preflight scan --tf-dir /path/to/module --auto-plan
+./scripts/tf-preflight scan --tf-dir /path/to/module --auto-plan --output json --report-path /tmp/report.json
 # Interactive guided mode (current directory)
 ./scripts/tf-preflight scan --interactive
 
 # Control CI behavior
-./scripts/tf-preflight scan --tf-dir /path/to/task06 --auto-plan --severity-threshold warn
+./scripts/tf-preflight scan --tf-dir /path/to/module --auto-plan --severity-threshold warn
 ```
 
 ### Options
