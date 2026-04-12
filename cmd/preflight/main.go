@@ -103,13 +103,13 @@ var errInteractiveCancel = errors.New("interactive scan cancelled")
 func runScan(opts model.CommandOptions) error {
 	ctx := context.Background()
 	progress := ui.NewProgress(opts.Output == "text", opts.Verbose, os.Stdout)
-	progress.Start("preparing workspace", 1)
+	progress.Message("preparing workspace")
 
 	absDir, err := filepath.Abs(opts.TfDir)
 	if err != nil {
 		return err
 	}
-	progress.Tick("loading Terraform directory")
+	progress.Message("loading Terraform directory")
 
 	hclCtx, err := discovery.ParseDirectory(absDir)
 	if err != nil {
@@ -127,13 +127,13 @@ func runScan(opts model.CommandOptions) error {
 	if len(hclCtx.Findings) > 0 {
 		progress.Message(fmt.Sprintf("hcl parsing produced %d module validation note(s)", len(hclCtx.Findings)))
 	}
-	progress.Tick("terraform directory parsed")
+	progress.Message("terraform directory parsed")
 
 	planData, finalPlanPath, err := resolvePlan(ctx, opts, absDir)
 	if err != nil {
 		return fmt.Errorf("failed resolving plan: %w", err)
 	}
-	progress.Tick("plan data loaded")
+	progress.Message("plan data loaded")
 
 	candidates, err := discovery.CandidatesFromPlan(planData, hclCtx)
 	if err != nil {
@@ -160,8 +160,8 @@ func runScan(opts model.CommandOptions) error {
 		}
 	}
 
-	progress.Tick("candidate set prepared")
-	progress.Tick(fmt.Sprintf("resolved %d candidate resource(s)", len(candidates)))
+	progress.Message("candidate set prepared")
+	progress.Message(fmt.Sprintf("resolved %d candidate resource(s)", len(candidates)))
 
 	token, err := resolveAzureToken(opts.Verbose)
 	if err != nil {
@@ -173,12 +173,12 @@ func runScan(opts model.CommandOptions) error {
 	if err != nil {
 		return err
 	}
-	progress.Tick("azure checks completed")
+	progress.Message("azure checks completed")
 	findings = append(hclCtx.Findings, findings...)
 
-	progress.Message("building report")
+	progress.Start("finalizing report", 1)
 	reportObj := report.BuildReport(absDir, finalPlanPath, opts.AutoPlan, subscriptionID, candidates, findings)
-	progress.Done("ready")
+	progress.Done("report ready")
 
 	if opts.Output == "json" {
 		if err := report.WriteJSON(reportObj, selectReportPath(opts)); err != nil {

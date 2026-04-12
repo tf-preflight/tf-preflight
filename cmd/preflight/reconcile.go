@@ -18,31 +18,31 @@ import (
 func runReconcile(opts model.CommandOptions) error {
 	ctx := context.Background()
 	progress := ui.NewProgress(opts.Output == "text", opts.Verbose, os.Stdout)
-	progress.Start("preparing workspace", 1)
+	progress.Message("preparing workspace")
 
 	absDir, err := filepath.Abs(opts.TfDir)
 	if err != nil {
 		return err
 	}
-	progress.Tick("loading Terraform directory")
+	progress.Message("loading Terraform directory")
 
 	hclCtx, err := discovery.ParseDirectory(absDir)
 	if err != nil {
 		return fmt.Errorf("failed parsing HCL: %w", err)
 	}
-	progress.Tick("terraform directory parsed")
+	progress.Message("terraform directory parsed")
 
 	planData, finalPlanPath, err := resolvePlan(ctx, opts, absDir)
 	if err != nil {
 		return fmt.Errorf("failed resolving plan: %w", err)
 	}
-	progress.Tick("plan data loaded")
+	progress.Message("plan data loaded")
 
 	candidates, err := discovery.CandidatesFromPlan(planData, hclCtx)
 	if err != nil {
 		return fmt.Errorf("failed reading plan: %w", err)
 	}
-	progress.Tick("candidate set prepared")
+	progress.Message("candidate set prepared")
 
 	subscriptionID, err := resolveSubscriptionID(opts, hclCtx)
 	if err != nil {
@@ -64,10 +64,10 @@ func runReconcile(opts model.CommandOptions) error {
 	if err != nil {
 		return err
 	}
-	progress.Message("building report")
+	progress.Start("finalizing report", 1)
 
 	reportObj := report.BuildReconcileReport(absDir, finalPlanPath, opts.AutoPlan, subscriptionID, len(candidates), result.EvaluatedCandidates, result.Findings, result.Recommendations)
-	progress.Done("ready")
+	progress.Done("report ready")
 
 	if opts.Output == "json" {
 		if err := report.WriteReconcileJSON(reportObj, selectReportPath(opts)); err != nil {

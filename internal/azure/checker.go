@@ -306,12 +306,12 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 		if !ok {
 			findings = append(findings, model.Finding{Severity: "warn", Code: "UNSUPPORTED_RESOURCE_TYPE", Message: fmt.Sprintf("resource type %s is not mapped", candidate.ResourceType), Resource: candidate.Address})
 			if progress != nil {
-				progress.Tick(fmt.Sprintf("%s: type %s unsupported", candidate.Address, candidate.ResourceType))
+				progress.Tick(fmt.Sprintf("skipped unsupported type for %s (%s)", candidate.Address, candidate.ResourceType))
 			}
 			continue
 		}
 		if progress != nil {
-			progress.Message(fmt.Sprintf("validating %s (%s)", candidate.Address, candidate.ResourceType))
+			progress.Message(fmt.Sprintf("checking %s (%s)", candidate.Address, candidate.ResourceType))
 		}
 		candidate.Namespace = meta.Namespace
 		if candidate.Location == "" {
@@ -338,7 +338,7 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 			}
 		}
 		if progress != nil {
-			progress.Tick(fmt.Sprintf("%s checked", candidate.Address))
+			progress.Tick(fmt.Sprintf("checked %s", candidate.Address))
 		}
 	}
 	if progress != nil {
@@ -357,7 +357,7 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 		if err != nil {
 			findings = append(findings, model.Finding{Severity: "error", Code: "PROVIDER_QUERY_FAILED", Message: fmt.Sprintf("provider %s registration check failed: %v", ns, err)})
 			if progress != nil {
-				progress.Tick(fmt.Sprintf("provider %s failed", ns))
+				progress.Tick(fmt.Sprintf("provider %s query failed", ns))
 			}
 			continue
 		}
@@ -369,7 +369,7 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 			continue
 		}
 		if progress != nil {
-			progress.Tick(fmt.Sprintf("provider %s", ns))
+			progress.Tick(fmt.Sprintf("checked provider %s", ns))
 		}
 	}
 	if progress != nil {
