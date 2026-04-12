@@ -14,7 +14,9 @@ func TestIsLocationAvailable(t *testing.T) {
 
 func TestIsQuotaExceeded(t *testing.T) {
 	items := []usageResponseItem{
-		{Name: struct{ Value string }{Value: "sites"}, CurrentValue: 10, Limit: 10},
+		{Name: struct {
+			Value string `json:"value"`
+		}{Value: "sites"}, CurrentValue: 10, Limit: 10},
 	}
 	exceeded, metric := isQuotaExceeded(items, []string{"sites"})
 	if !exceeded {

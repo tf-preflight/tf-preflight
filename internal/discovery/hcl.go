@@ -3,6 +3,7 @@ package discovery
 import (
 	"fmt"
 	"io/fs"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,17 +17,17 @@ import (
 )
 
 type HCLContext struct {
-	Variables    map[string]any
-	Locals       map[string]any
-	Subscription string
-	RootDir      string
-	CandidateMap map[string]model.Candidate
-	Candidates   []model.Candidate
+	Variables     map[string]any
+	Locals        map[string]any
+	Subscription  string
+	RootDir       string
+	CandidateMap  map[string]model.Candidate
+	Candidates    []model.Candidate
 	ModuleImports []model.ModuleImport
-	Findings     []model.Finding
+	Findings      []model.Finding
 }
 
-// ParseDirectory extracts static Terraform intent from .tf/.tfvars files.
+// ParseDirectory extracts static Terraform intent from .tf files.
 func ParseDirectory(root string) (*HCLContext, error) {
 	ctx := &HCLContext{
 		Variables:    map[string]any{},
@@ -47,7 +48,7 @@ func ParseDirectory(root string) (*HCLContext, error) {
 			}
 			return nil
 		}
-		if strings.HasSuffix(path, ".tf") || strings.HasSuffix(path, ".tfvars") {
+		if strings.HasSuffix(path, ".tf") {
 			files = append(files, path)
 		}
 		return nil
@@ -71,9 +72,9 @@ func ParseDirectory(root string) (*HCLContext, error) {
 				{Type: "module", LabelNames: []string{"name"}},
 			},
 		}
-		content, _, diags := file.Body.Content(blockSchema)
-		if diags.HasErrors() {
-			return nil, diags
+		content, _, _ := file.Body.PartialContent(blockSchema)
+		if content == nil {
+			continue
 		}
 
 		parseVariables(content, ctx)
@@ -98,11 +99,15 @@ func parseVariables(content *hcl.BodyContent, ctx *HCLContext) {
 			continue
 		}
 		name := b.Labels[0]
-		attrs, diags := b.Body.JustAttributes()
-		if diags.HasErrors() {
+		content, _, _ := b.Body.PartialContent(&hcl.BodySchema{
+			Attributes: []hcl.AttributeSchema{
+				{Name: "default"},
+			},
+		})
+		if content == nil {
 			continue
 		}
-		if attr, ok := attrs["default"]; ok {
+		if attr, ok := content.Attributes["default"]; ok {
 			if val, ok := evalExpression(attr.Expr, ctx); ok {
 				ctx.Variables[name] = val
 			}
@@ -114,6 +119,9 @@ func parseLocals(content *hcl.BodyContent, ctx *HCLContext) {
 	for _, b := range content.Blocks.OfType("locals") {
 		attrs, diags := b.Body.JustAttributes()
 		if diags.HasErrors() {
+			// Ignore block-level diagnostics and keep best-effort attribute resolution.
+		}
+		if len(attrs) == 0 {
 			continue
 		}
 		for key, attr := range attrs {
@@ -129,11 +137,15 @@ func parseProvider(content *hcl.BodyContent, ctx *HCLContext) {
 		if len(b.Labels) != 1 || b.Labels[0] != "azurerm" {
 			continue
 		}
-		attrs, diags := b.Body.JustAttributes()
-		if diags.HasErrors() {
+		content, _, _ := b.Body.PartialContent(&hcl.BodySchema{
+			Attributes: []hcl.AttributeSchema{
+				{Name: "subscription_id"},
+			},
+		})
+		if content == nil {
 			continue
 		}
-		if attr, ok := attrs["subscription_id"]; ok {
+		if attr, ok := content.Attributes["subscription_id"]; ok {
 			if val, ok := evalExpression(attr.Expr, ctx); ok {
 				if s, ok := toString(val); ok {
 					ctx.Subscription = s
@@ -149,15 +161,19 @@ func parseModules(content *hcl.BodyContent, ctx *HCLContext, filePath string) {
 			continue
 		}
 		name := b.Labels[0]
-		attrs, diags := b.Body.JustAttributes()
-		if diags.HasErrors() {
+		content, _, _ := b.Body.PartialContent(&hcl.BodySchema{
+			Attributes: []hcl.AttributeSchema{
+				{Name: "source"},
+			},
+		})
+		if content == nil {
 			continue
 		}
 		mod := model.ModuleImport{
 			Name: name,
 			File: filePath,
 		}
-		if attr, ok := attrs["source"]; ok {
+		if attr, ok := content.Attributes["source"]; ok {
 			if v, ok := evalExpression(attr.Expr, ctx); ok {
 				if s, ok := toString(v); ok {
 					mod.Source = strings.TrimSpace(s)
@@ -291,6 +307,7 @@ func validateModuleImports(ctx *HCLContext) {
 }
 
 func hasTerraformFiles(path string) (bool, error) {
+	found := false
 	err := filepath.WalkDir(path, func(candidate string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -302,15 +319,13 @@ func hasTerraformFiles(path string) (bool, error) {
 			return nil
 		}
 		if strings.HasSuffix(candidate, ".tf") {
+			found = true
 			return fs.SkipAll
 		}
 		return nil
 	})
-	if err == nil {
-		return false, nil
-	}
-	if err == fs.SkipAll {
-		return true, nil
+	if err == nil || err == fs.SkipAll {
+		return found, nil
 	}
 	return false, err
 }
@@ -339,32 +354,39 @@ func parseResources(content *hcl.BodyContent, ctx *HCLContext) {
 			RawRestrictions: map[string]any{},
 		}
 
-		attrs, diags := b.Body.JustAttributes()
-		if diags.HasErrors() {
+		blockContent, _, _ := b.Body.PartialContent(&hcl.BodySchema{
+			Attributes: []hcl.AttributeSchema{
+				{Name: "location"},
+				{Name: "name"},
+				{Name: "resource_group_name"},
+				{Name: "sku"},
+			},
+		})
+		if blockContent == nil {
 			continue
 		}
-		if v, ok := attrs["location"]; ok {
+		if v, ok := blockContent.Attributes["location"]; ok {
 			if val, ok := evalExpression(v.Expr, ctx); ok {
 				if s, ok := toString(val); ok {
 					cand.Location = s
 				}
 			}
 		}
-		if v, ok := attrs["name"]; ok {
+		if v, ok := blockContent.Attributes["name"]; ok {
 			if val, ok := evalExpression(v.Expr, ctx); ok {
 				if s, ok := toString(val); ok {
 					cand.Name = s
 				}
 			}
 		}
-		if v, ok := attrs["resource_group_name"]; ok {
+		if v, ok := blockContent.Attributes["resource_group_name"]; ok {
 			if val, ok := evalExpression(v.Expr, ctx); ok {
 				if s, ok := toString(val); ok {
 					cand.ResourceGroup = s
 				}
 			}
 		}
-		if v, ok := attrs["sku"]; ok {
+		if v, ok := blockContent.Attributes["sku"]; ok {
 			if val, ok := evalExpression(v.Expr, ctx); ok {
 				if s, ok := pickSKU(val); ok {
 					cand.Sku = s
@@ -377,9 +399,9 @@ func parseResources(content *hcl.BodyContent, ctx *HCLContext) {
 	}
 }
 
-func parseRestrictionsFromBody(body *hclsyntax.Body, store map[string]any, ctx *HCLContext) {
+func parseRestrictionsFromBody(body hcl.Body, store map[string]any, ctx *HCLContext) {
 	restrictionSchema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "ip_restriction", LabelNames: nil}, {Type: "firewall_rule", LabelNames: nil}}}
-	content, _, diags := body.Content(restrictionSchema)
+	content, diags := body.Content(restrictionSchema)
 	if diags.HasErrors() {
 		return
 	}
@@ -451,7 +473,7 @@ func evalExpression(expr hcl.Expression, ctx *HCLContext) (any, bool) {
 		return resolveTraversal(v, ctx)
 	case *hclsyntax.FunctionCallExpr:
 		return evalFunction(v, ctx)
-	case *hclsyntax.ParenthesizedExpr:
+	case *hclsyntax.ParenthesesExpr:
 		return evalExpression(v.Expression, ctx)
 	case *hclsyntax.BinaryOpExpr:
 		left, lok := evalExpression(v.LHS, ctx)
@@ -465,7 +487,7 @@ func evalExpression(expr hcl.Expression, ctx *HCLContext) (any, bool) {
 			return ls + rs, true
 		}
 		return nil, false
-	case *hclsyntax.TupleExpr:
+	case *hclsyntax.TupleConsExpr:
 		items := make([]any, 0, len(v.Exprs))
 		for _, e := range v.Exprs {
 			if val, ok := evalExpression(e, ctx); ok {
@@ -493,13 +515,13 @@ func evalExpression(expr hcl.Expression, ctx *HCLContext) (any, bool) {
 	return nil, false
 }
 
-func evalFunction(fn *hclsyntax.FunctionCallExpr, _ *HCLContext) (any, bool) {
+func evalFunction(fn *hclsyntax.FunctionCallExpr, ctx *HCLContext) (any, bool) {
 	switch fn.Name {
 	case "format":
 		if len(fn.Args) == 0 {
 			return nil, false
 		}
-		fmtRaw, ok := evalExpression(fn.Args[0], nil)
+		fmtRaw, ok := evalExpression(fn.Args[0], ctx)
 		if !ok {
 			return nil, false
 		}
@@ -509,7 +531,7 @@ func evalFunction(fn *hclsyntax.FunctionCallExpr, _ *HCLContext) (any, bool) {
 		}
 		parts := make([]any, 0, len(fn.Args)-1)
 		for _, arg := range fn.Args[1:] {
-			v, ok := evalExpression(arg, nil)
+			v, ok := evalExpression(arg, ctx)
 			if !ok {
 				return nil, false
 			}
@@ -520,7 +542,7 @@ func evalFunction(fn *hclsyntax.FunctionCallExpr, _ *HCLContext) (any, bool) {
 		if len(fn.Args) != 2 {
 			return nil, false
 		}
-		sepRaw, ok := evalExpression(fn.Args[0], nil)
+		sepRaw, ok := evalExpression(fn.Args[0], ctx)
 		if !ok {
 			return nil, false
 		}
@@ -528,7 +550,7 @@ func evalFunction(fn *hclsyntax.FunctionCallExpr, _ *HCLContext) (any, bool) {
 		if !ok {
 			return nil, false
 		}
-		vals, ok := evalExpression(fn.Args[1], nil)
+		vals, ok := evalExpression(fn.Args[1], ctx)
 		if !ok {
 			return nil, false
 		}
@@ -547,7 +569,7 @@ func evalFunction(fn *hclsyntax.FunctionCallExpr, _ *HCLContext) (any, bool) {
 		if len(fn.Args) != 1 {
 			return nil, false
 		}
-		v, ok := evalExpression(fn.Args[0], nil)
+		v, ok := evalExpression(fn.Args[0], ctx)
 		if !ok {
 			return nil, false
 		}
@@ -560,7 +582,7 @@ func evalFunction(fn *hclsyntax.FunctionCallExpr, _ *HCLContext) (any, bool) {
 		if len(fn.Args) != 1 {
 			return nil, false
 		}
-		v, ok := evalExpression(fn.Args[0], nil)
+		v, ok := evalExpression(fn.Args[0], ctx)
 		if !ok {
 			return nil, false
 		}
@@ -585,7 +607,10 @@ func resolveTraversal(expr *hclsyntax.ScopeTraversalExpr, ctx *HCLContext) (any,
 	parts := []string{}
 	if len(split.Abs) > 0 {
 		for _, p := range split.Abs {
-			if step, ok := p.(hcl.TraverseAttr); ok {
+			switch step := p.(type) {
+			case hcl.TraverseAttr:
+				parts = append(parts, step.Name)
+			case hcl.TraverseRoot:
 				parts = append(parts, step.Name)
 			}
 		}
@@ -627,7 +652,7 @@ func ctyToGo(v cty.Value) any {
 		return v.AsString()
 	}
 	if v.Type() == cty.Number {
-		if f, err := v.AsBigFloat().Float64(); err == nil {
+		if f, acc := v.AsBigFloat().Float64(); acc == big.Exact {
 			return f
 		}
 		return nil

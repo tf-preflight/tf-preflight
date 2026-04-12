@@ -103,6 +103,12 @@ PRE_FLIGHT_REPO=<owner>/<repo> bash -c 'curl -fsSL https://raw.githubusercontent
 - `MODULE_SOURCE_UNREADABLE` (warn): module source exists but cannot be inspected.
 - `MODULE_UNUSED_DIR` (warn): directory under `<tf-dir>/modules/` exists but is not imported.
 
+### HCL discovery behavior
+
+- Static discovery is intentionally permissive and uses partial parsing to avoid false positives from provider-specific nested blocks (for example, `features {}` in provider configuration).
+- The CLI currently evaluates intent from Terraform `.tf` files during discovery and merges runtime/resolved values from plan output when available.
+- `.tfvars` values are not parsed as configuration blocks in discovery and are expected to be represented through plan values or explicit defaults.
+
 ## Exit codes
 
 - `0` pass (or no blocking findings for configured threshold)
