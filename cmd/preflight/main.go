@@ -138,7 +138,10 @@ func runScan(opts model.CommandOptions) error {
 		return fmt.Errorf("failed reading plan: %w", err)
 	}
 
-	subscriptionID := resolveSubscriptionID(opts, hclCtx)
+	subscriptionID, err := resolveSubscriptionID(opts, hclCtx)
+	if err != nil {
+		return err
+	}
 	for i := range candidates {
 		if candidates[i].SubscriptionID == "" {
 			candidates[i].SubscriptionID = subscriptionID
@@ -214,13 +217,13 @@ func resolvePlan(ctx context.Context, opts model.CommandOptions, tfDir string) (
 			if len(data) == 0 {
 				return nil, p, fmt.Errorf("plan file is empty")
 			}
-			if isJSONPlan(data) {
-				if opts.Verbose {
-					fmt.Fprintf(os.Stdout, "Using existing JSON plan: %s\n", p)
-				}
-				return data, p, nil
+			if err := validateTerraformPlanJSON(data); err != nil {
+				return nil, p, fmt.Errorf("plan file is valid JSON but not a Terraform plan JSON document: %w", err)
 			}
-			return nil, p, fmt.Errorf("plan file is not valid json")
+			if opts.Verbose {
+				fmt.Fprintf(os.Stdout, "Using existing JSON plan: %s\n", p)
+			}
+			return data, p, nil
 		}
 		if opts.Verbose {
 			fmt.Fprintf(os.Stdout, "Converting binary plan to JSON: %s\n", p)
@@ -258,6 +261,9 @@ func terraformShowJSON(ctx context.Context, planPath string, verbose bool) ([]by
 	data, err := cmd.Output()
 	if err != nil {
 		return nil, planPath, err
+	}
+	if err := validateTerraformPlanJSON(data); err != nil {
+		return nil, planPath, fmt.Errorf("terraform show output is not a Terraform plan JSON document: %w", err)
 	}
 	return data, planPath, nil
 }
@@ -319,7 +325,27 @@ func printVersion() {
 	fmt.Printf("  go: %s\n", goVersion)
 }
 
-func isJSONPlan(data []byte) bool {
-	var js map[string]any
-	return json.Unmarshal(data, &js) == nil
+func validateTerraformPlanJSON(data []byte) error {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return fmt.Errorf("invalid json: %w", err)
+	}
+
+	rawFormatVersion, ok := envelope["format_version"]
+	if !ok {
+		return errors.New("missing format_version")
+	}
+
+	var formatVersion string
+	if err := json.Unmarshal(rawFormatVersion, &formatVersion); err != nil || strings.TrimSpace(formatVersion) == "" {
+		return errors.New("format_version must be a non-empty string")
+	}
+
+	for _, key := range []string{"resource_changes", "planned_values", "configuration"} {
+		if _, ok := envelope[key]; ok {
+			return nil
+		}
+	}
+
+	return errors.New("missing Terraform plan sections (expected one of resource_changes, planned_values, configuration)")
 }

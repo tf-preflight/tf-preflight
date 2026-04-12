@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Harden the public contract: executable preferred wrapper, usable `scan --help` / `reconcile --help`, explicit Terraform plan JSON validation, shared Azure subscription fallback, and surfaced existence-probe backend failures.
+- Add CI smoke coverage for binary build, wrapper execution, and local-clone installer execution.
 - Add `tf-preflight reconcile` as a read-only import-gap detection stage before `scan`, with exact `terraform import` recommendations for supported Azure resource types.
 - Add dedicated reconcile reporting, JSON output, CLI validation, and tests covering candidate filtering, import ID generation, Azure probe outcomes, and auto-plan execution.
 - Add progress and verbose output in the CLI flow (`tf-preflight scan`) for long-running checks.

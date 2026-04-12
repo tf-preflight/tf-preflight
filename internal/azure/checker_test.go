@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/tf-preflight/tf-preflight/internal/model"
@@ -147,5 +148,53 @@ func TestProbePath_StatusHandling(t *testing.T) {
 	status, err = client.ProbePath(context.Background(), "GET", "/broken")
 	if err != nil || status != http.StatusInternalServerError {
 		t.Fatalf("expected 500 without error, got status=%d err=%v", status, err)
+	}
+}
+
+func TestRunChecks_SurfacesExistenceProbeFailures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"value":[{"name":"westeurope","displayName":"West Europe"}]}`))
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Resources"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"registrationState":"Registered"}`))
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-test"):
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewAzureClient("token")
+	client.BaseURL = server.URL
+	client.HTTPClient = server.Client()
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{
+		{
+			Address:        "azurerm_resource_group.rg",
+			ResourceType:   "azurerm_resource_group",
+			Mode:           "managed",
+			Action:         "create",
+			SubscriptionID: "sub-123",
+			Name:           "rg-test",
+			Location:       "westeurope",
+		},
+	}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	found := false
+	for _, finding := range findings {
+		if finding.Code == "RESOURCE_EXISTS_CHECK_FAILED" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected RESOURCE_EXISTS_CHECK_FAILED, got %+v", findings)
 	}
 }

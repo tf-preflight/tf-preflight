@@ -5,11 +5,60 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/tf-preflight/tf-preflight/internal/model"
 )
 
+var errHelp = errors.New("help requested")
+
+type helpError struct {
+	text string
+}
+
+func (e *helpError) Error() string {
+	return e.text
+}
+
+func (e *helpError) Unwrap() error {
+	return errHelp
+}
+
+func scanUsage() string {
+	return `Usage:
+  tf-preflight scan --tf-dir <path> [--plan <plan-path> | --auto-plan | --interactive]
+
+Flags:
+  --tf-dir              Terraform directory
+  --plan                Path to tfplan file (binary .tfplan) or json plan
+  --auto-plan           Run terraform init + plan -out internally
+  --interactive         Run guided interactive scan flow
+  --subscription-id     Optional subscription override
+  --severity-threshold  warn|error
+  --output              text|json
+  --report-path         Optional JSON report path
+  --verbose             Print detailed runtime output`
+}
+
+func reconcileUsage() string {
+	return `Usage:
+  tf-preflight reconcile --tf-dir <path> [--plan <plan-path> | --auto-plan]
+
+Flags:
+  --tf-dir           Terraform directory
+  --plan             Path to tfplan file (binary .tfplan) or json plan
+  --auto-plan        Run terraform init + plan -out internally
+  --subscription-id  Optional subscription override
+  --output           text|json
+  --report-path      Optional JSON report path
+  --verbose          Print detailed runtime output`
+}
+
 func parseScanOptions(args []string) (model.CommandOptions, error) {
+	if hasHelpFlag(args) {
+		return model.CommandOptions{}, &helpError{text: scanUsage()}
+	}
+
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
@@ -71,6 +120,10 @@ func parseScanOptions(args []string) (model.CommandOptions, error) {
 }
 
 func parseReconcileOptions(args []string) (model.CommandOptions, error) {
+	if hasHelpFlag(args) {
+		return model.CommandOptions{}, &helpError{text: reconcileUsage()}
+	}
+
 	fs := flag.NewFlagSet("reconcile", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
@@ -110,8 +163,20 @@ func exitCodeForError(err error) int {
 	if err == nil {
 		return 0
 	}
+	if errors.Is(err, errHelp) {
+		return 0
+	}
 	if errors.Is(err, errUsage) || errors.Is(err, errInteractiveCancel) {
 		return 2
 	}
 	return 1
+}
+
+func hasHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if strings.TrimSpace(arg) == "-h" || strings.TrimSpace(arg) == "--help" {
+			return true
+		}
+	}
+	return false
 }

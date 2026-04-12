@@ -41,6 +41,8 @@ From a local clone:
 ./scripts/install.sh
 ```
 
+This installs directly from the current checkout when run inside a local clone.
+
 From a remote URL (upstream, no env vars required):
 
 ```bash
@@ -139,6 +141,7 @@ Recommended workflow:
 2. Location availability in subscription (`/subscriptions/{id}/locations`)
 3. Quota checks from usages endpoints when mappings are available
 4. Safe existence probes for planned names on create/update
+   - backend probe failures are surfaced explicitly as errors
 5. Unknown resource types and unresolved/static-unknown locations are reported as warnings
 6. Local module imports are validated:
    - verifies local module source paths exist
@@ -177,8 +180,8 @@ Recommended workflow:
 
 | Finding type | Trigger | Severity | Threshold fail impact |
 |---|---|---|---|
-| `error` | invalid location / provider not registered / quota exceeded | hard | always fail |
-| `warn` | unsupported type / location unknown / existence probe / quota endpoint unavailable | warning | fail only with `--severity-threshold warn` |
+| `error` | invalid location / provider not registered / quota exceeded / existence probe backend failure | hard | always fail |
+| `warn` | unsupported type / location unknown / resource exists / quota endpoint unavailable | warning | fail only with `--severity-threshold warn` |
 | `none` | all checks clean | pass | pass |
 
 ## Authentication and Azure API usage

@@ -6,6 +6,7 @@
 tfplan
 .preflight.tfplan
 .preflight.tfplan.json
+bin/
 
 # Python cache
 __pycache__/

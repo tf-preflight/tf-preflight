@@ -44,7 +44,10 @@ func runReconcile(opts model.CommandOptions) error {
 	}
 	progress.Tick("candidate set prepared")
 
-	subscriptionID := resolveSubscriptionID(opts, hclCtx)
+	subscriptionID, err := resolveSubscriptionID(opts, hclCtx)
+	if err != nil {
+		return err
+	}
 	for i := range candidates {
 		if candidates[i].SubscriptionID == "" {
 			candidates[i].SubscriptionID = subscriptionID
@@ -85,7 +88,7 @@ func runReconcile(opts model.CommandOptions) error {
 	return nil
 }
 
-func resolveSubscriptionID(opts model.CommandOptions, hclCtx *discovery.HCLContext) string {
+func resolveSubscriptionID(opts model.CommandOptions, hclCtx *discovery.HCLContext) (string, error) {
 	subscriptionID := opts.SubscriptionID
 	if subscriptionID == "" && hclCtx != nil {
 		subscriptionID = hclCtx.Subscription
@@ -96,5 +99,13 @@ func resolveSubscriptionID(opts model.CommandOptions, hclCtx *discovery.HCLConte
 	if subscriptionID == "" {
 		subscriptionID = strings.TrimSpace(os.Getenv("AZURE_SUBSCRIPTION_ID"))
 	}
-	return subscriptionID
+	if subscriptionID != "" {
+		return subscriptionID, nil
+	}
+
+	subscriptionID, err := azure.ResolveSubscriptionFromCLI()
+	if err != nil {
+		return "", fmt.Errorf("subscription could not be resolved: %w", err)
+	}
+	return subscriptionID, nil
 }

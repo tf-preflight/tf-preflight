@@ -23,5 +23,17 @@ jobs:
         run: |
           test -z "$(gofmt -l . | tee /tmp/gofmt.out)" || (cat /tmp/gofmt.out && exit 1)
 
+      - name: Build binary
+        run: make build
+
+      - name: Wrapper smoke
+        run: ./scripts/tf-preflight version
+
+      - name: Installer smoke
+        run: |
+          install_dir="$(mktemp -d)"
+          PRE_FLIGHT_INSTALL_DIR="${install_dir}" bash scripts/install.sh
+          "${install_dir}/tf-preflight" version
+
       - name: Run tests
         run: go test ./...

@@ -248,7 +248,7 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 		return nil, fmt.Errorf("no azure token available")
 	}
 	if subscriptionID == "" {
-		sub, err := resolveSubscriptionFromCLI()
+		sub, err := ResolveSubscriptionFromCLI()
 		if err != nil {
 			return nil, fmt.Errorf("subscription could not be resolved: %w", err)
 		}
@@ -301,8 +301,29 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 
 		if candidate.Action == "create" || candidate.Action == "update" || candidate.Action == "replace" {
 			if path, missing, ok := BuildExistsPath(candidate); ok && len(missing) == 0 {
-				if status, err := client.ProbePath(ctx, "GET", path); err == nil && status >= 200 && status < 300 {
+				status, err := client.ProbePath(ctx, "GET", path)
+				switch {
+				case err != nil:
+					findings = append(findings, model.Finding{
+						Severity: "error",
+						Code:     "RESOURCE_EXISTS_CHECK_FAILED",
+						Message:  fmt.Sprintf("resource existence probe failed: %v", err),
+						Resource: candidate.Address,
+					})
+				case status == http.StatusNotFound:
+					// Expected for resources that do not yet exist.
+				case status >= 200 && status < 300:
 					findings = append(findings, model.Finding{Severity: "warn", Code: "RESOURCE_EXISTS", Message: "resource already exists", Resource: candidate.Address})
+				default:
+					findings = append(findings, model.Finding{
+						Severity: "error",
+						Code:     "RESOURCE_EXISTS_CHECK_FAILED",
+						Message:  fmt.Sprintf("resource existence probe returned unexpected status: %d", status),
+						Resource: candidate.Address,
+						Detail: map[string]any{
+							"status_code": status,
+						},
+					})
 				}
 			}
 			if meta.QuotaPath != "" && candidate.Location != "" {
@@ -418,7 +439,7 @@ func isQuotaExceeded(items []usageResponseItem, checks []string) (bool, string) 
 	return false, ""
 }
 
-func resolveSubscriptionFromCLI() (string, error) {
+func ResolveSubscriptionFromCLI() (string, error) {
 	cmd := exec.Command("az", "account", "show", "--query", "id", "-o", "tsv")
 	out, err := cmd.Output()
 	if err != nil {

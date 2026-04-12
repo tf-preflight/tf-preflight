@@ -1,10 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${PRE_FLIGHT_REPO:-tf-preflight/tf-preflight}"
-VERSION="${PRE_FLIGHT_VERSION:-latest}"
 DEST_DIR="${PRE_FLIGHT_INSTALL_DIR:-${HOME}/.local/bin}"
 BINARY="tf-preflight"
+REPO="${PRE_FLIGHT_REPO:-}"
+VERSION="${PRE_FLIGHT_VERSION:-latest}"
+
+resolve_local_source_dir() {
+  if [ -n "${PRE_FLIGHT_REPO:-}" ]; then
+    return 1
+  fi
+
+  if command -v git >/dev/null 2>&1 && git -C "$(pwd)" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [ -f "$(pwd)/go.mod" ]; then
+    printf '%s' "$(pwd)"
+    return 0
+  fi
+
+  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    local script_root
+    script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    if command -v git >/dev/null 2>&1 && git -C "${script_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [ -f "${script_root}/go.mod" ]; then
+      printf '%s' "${script_root}"
+      return 0
+    fi
+  fi
+
+  return 1
+}
 
 resolve_release_version() {
   if [ "${VERSION}" != "latest" ]; then
@@ -41,7 +63,7 @@ install_from_source() {
   local ldflags="${PRE_FLIGHT_LDFLAGS:--s -w}"
   local version="${PRE_FLIGHT_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
   local commit="${PRE_FLIGHT_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
-  local build_date="${PRE_FLIGHT_BUILD_DATE:-$(date -u +\"%Y-%m-%dT%H:%M:%SZ\" 2>/dev/null || echo '')}"
+  local build_date="${PRE_FLIGHT_BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '')}"
   go build -ldflags "${ldflags} -X main.version=${version} -X main.gitCommit=${commit} -X main.buildDate=${build_date}" \
     -o "${DEST_DIR}/${BINARY}" ./cmd/preflight
   chmod +x "${DEST_DIR}/${BINARY}"
@@ -91,6 +113,15 @@ install_from_release() {
   rm -rf "${tmp_dir}"
 }
 
+if local_src_dir="$(resolve_local_source_dir)"; then
+  install_from_source "${local_src_dir}"
+  exit 0
+fi
+
+if [ -z "${REPO}" ]; then
+  REPO="tf-preflight/tf-preflight"
+fi
+
 if [ -n "${REPO}" ]; then
   if install_from_release; then
     exit 0
@@ -109,16 +140,6 @@ if [ -n "${REPO}" ]; then
 
   echo "ERROR: release install failed and git is unavailable for source fallback." >&2
   exit 1
-fi
-
-if command -v git >/dev/null 2>&1 && git -C "$(pwd)" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  install_from_source "$(pwd)"
-  exit 0
-fi
-
-if command -v git >/dev/null 2>&1 && [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ] && git -C "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  install_from_source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  exit 0
 fi
 
 echo "ERROR: unable to install." >&2
