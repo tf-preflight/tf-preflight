@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -196,5 +199,302 @@ func TestRunChecks_SurfacesExistenceProbeFailures(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected RESOURCE_EXISTS_CHECK_FAILED, got %+v", findings)
+	}
+}
+
+func TestRunChecks_ReturnsErrorWhenTokenMissing(t *testing.T) {
+	_, err := RunChecks(context.Background(), nil, NewAzureClient(""), "sub-123", "error", nil)
+	if err == nil {
+		t.Fatal("expected missing token error")
+	}
+	if !strings.Contains(err.Error(), "no azure token available") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunChecks_ReturnsErrorWhenSubscriptionCannotBeResolved(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	_, err := RunChecks(context.Background(), nil, NewAzureClient("token"), "", "error", nil)
+	if err == nil {
+		t.Fatal("expected subscription resolution error")
+	}
+	if !strings.Contains(err.Error(), "subscription could not be resolved") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveSubscriptionFromCLI_EmptyOutputFails(t *testing.T) {
+	binDir := t.TempDir()
+	azPath := filepath.Join(binDir, "az")
+	if err := os.WriteFile(azPath, []byte("#!/bin/sh\nset -eu\nprintf ''\n"), 0o755); err != nil {
+		t.Fatalf("unable to write az stub: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := ResolveSubscriptionFromCLI()
+	if err == nil {
+		t.Fatal("expected empty subscription output to fail")
+	}
+	if !strings.Contains(err.Error(), "empty subscription id") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunChecks_SurfacesProviderLookupFailure(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-test"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Resources"):
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_resource_group.rg",
+		ResourceType:   "azurerm_resource_group",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		Name:           "rg-test",
+		Location:       "westeurope",
+	}}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	assertFindingCodes(t, findings, []string{"PROVIDER_QUERY_FAILED"})
+}
+
+func TestRunChecks_SurfacesLocationLookupFailure(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			w.WriteHeader(http.StatusInternalServerError)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-test"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Resources"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_resource_group.rg",
+		ResourceType:   "azurerm_resource_group",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		Name:           "rg-test",
+		Location:       "westeurope",
+	}}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	if !hasFindingCode(findings, "SUBSCRIPTION_LOCATIONS") {
+		t.Fatalf("expected SUBSCRIPTION_LOCATIONS, got %+v", findings)
+	}
+	if hasFindingCode(findings, "INVALID_LOCATION") {
+		t.Fatalf("did not expect INVALID_LOCATION when location lookup failed, got %+v", findings)
+	}
+}
+
+func TestRunChecks_SurfacesQuotaLookupFailure(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/serverFarms/asp-01"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web/locations/westeurope/usages"):
+			w.WriteHeader(http.StatusInternalServerError)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_service_plan.asp",
+		ResourceType:   "azurerm_service_plan",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		ResourceGroup:  "rg-app",
+		Name:           "asp-01",
+		Location:       "westeurope",
+	}}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	assertFindingCodes(t, findings, []string{"QUOTA_UNKNOWN"})
+}
+
+func TestRunChecks_SurfacesUnsupportedExistenceMapping(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql/locations/westeurope/usages"):
+			writeJSON(w, `{"value":[{"name":{"value":"databases"},"currentValue":1,"limit":10}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Sql"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_mssql_database.db",
+		ResourceType:   "azurerm_mssql_database",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		ResourceGroup:  "rg-db",
+		Name:           "db-01",
+		Location:       "westeurope",
+	}}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	assertFindingCodes(t, findings, []string{"RESOURCE_EXISTS_CHECK_UNSUPPORTED"})
+}
+
+func TestRunChecks_SurfacesIncompleteExistenceMapping(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web/locations/westeurope/usages"):
+			writeJSON(w, `{"value":[{"name":{"value":"sites"},"currentValue":1,"limit":10}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_service_plan.asp",
+		ResourceType:   "azurerm_service_plan",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		Name:           "asp-01",
+		Location:       "westeurope",
+	}}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	assertFindingCodes(t, findings, []string{"RESOURCE_EXISTS_CHECK_INCOMPLETE"})
+}
+
+func TestRunChecks_MixedResultsRemainDeterministic(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-test"):
+			w.WriteHeader(http.StatusOK)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/serverFarms/asp-01"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web/locations/westeurope/usages"):
+			w.WriteHeader(http.StatusInternalServerError)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Resources"):
+			writeJSON(w, `{"registrationState":"NotRegistered"}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web"):
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{
+		{
+			Address:        "azurerm_resource_group.rg",
+			ResourceType:   "azurerm_resource_group",
+			Mode:           "managed",
+			Action:         "create",
+			SubscriptionID: "sub-123",
+			Name:           "rg-test",
+			Location:       "westeurope",
+		},
+		{
+			Address:        "azurerm_service_plan.asp",
+			ResourceType:   "azurerm_service_plan",
+			Mode:           "managed",
+			Action:         "create",
+			SubscriptionID: "sub-123",
+			ResourceGroup:  "rg-app",
+			Name:           "asp-01",
+			Location:       "westeurope",
+		},
+		{
+			Address:      "custom_resource.example",
+			ResourceType: "custom_resource_type",
+			Mode:         "managed",
+			Action:       "create",
+		},
+	}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+
+	assertFindingCodes(t, findings, []string{
+		"RESOURCE_EXISTS",
+		"QUOTA_UNKNOWN",
+		"UNSUPPORTED_RESOURCE_TYPE",
+		"PROVIDER_NOT_REGISTERED",
+		"PROVIDER_QUERY_FAILED",
+	})
+}
+
+func newAzureTestClient(t *testing.T, handler http.HandlerFunc) *AzureClient {
+	t.Helper()
+
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	client := NewAzureClient("token")
+	client.BaseURL = server.URL
+	client.HTTPClient = server.Client()
+	return client
+}
+
+func writeJSON(w http.ResponseWriter, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(body))
+}
+
+func hasFindingCode(findings []model.Finding, code string) bool {
+	for _, finding := range findings {
+		if finding.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func assertFindingCodes(t *testing.T, findings []model.Finding, want []string) {
+	t.Helper()
+
+	got := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		got = append(got, finding.Code)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected finding codes: got %v want %v", got, want)
 	}
 }

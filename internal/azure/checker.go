@@ -244,7 +244,7 @@ func (c *AzureClient) ProbePath(ctx context.Context, method, path string) (int, 
 
 func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureClient, subscriptionID string, threshold string, progress *ui.Progress) ([]model.Finding, error) {
 	_ = threshold
-	if client == nil || client.Token == "" {
+	if client == nil || strings.TrimSpace(client.Token) == "" {
 		return nil, fmt.Errorf("no azure token available")
 	}
 	if subscriptionID == "" {
@@ -300,32 +300,7 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 		providers[meta.Namespace] = struct{}{}
 
 		if candidate.Action == "create" || candidate.Action == "update" || candidate.Action == "replace" {
-			if path, missing, ok := BuildExistsPath(candidate); ok && len(missing) == 0 {
-				status, err := client.ProbePath(ctx, "GET", path)
-				switch {
-				case err != nil:
-					findings = append(findings, model.Finding{
-						Severity: "error",
-						Code:     "RESOURCE_EXISTS_CHECK_FAILED",
-						Message:  fmt.Sprintf("resource existence probe failed: %v", err),
-						Resource: candidate.Address,
-					})
-				case status == http.StatusNotFound:
-					// Expected for resources that do not yet exist.
-				case status >= 200 && status < 300:
-					findings = append(findings, model.Finding{Severity: "warn", Code: "RESOURCE_EXISTS", Message: "resource already exists", Resource: candidate.Address})
-				default:
-					findings = append(findings, model.Finding{
-						Severity: "error",
-						Code:     "RESOURCE_EXISTS_CHECK_FAILED",
-						Message:  fmt.Sprintf("resource existence probe returned unexpected status: %d", status),
-						Resource: candidate.Address,
-						Detail: map[string]any{
-							"status_code": status,
-						},
-					})
-				}
-			}
+			findings = append(findings, runExistenceCheck(ctx, client, candidate)...)
 			if meta.QuotaPath != "" && candidate.Location != "" {
 				q := fmt.Sprintf(meta.QuotaPath, candidate.SubscriptionID, url.PathEscape(strings.ToLower(candidate.Location)))
 				usage, err := fetchUsages(ctx, client, q)
@@ -345,7 +320,13 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 		progress.Start("checking provider registrations", len(providers))
 	}
 
+	namespaces := make([]string, 0, len(providers))
 	for ns := range providers {
+		namespaces = append(namespaces, ns)
+	}
+	sort.Strings(namespaces)
+
+	for _, ns := range namespaces {
 		registered, err := isProviderRegistered(ctx, client, subscriptionID, ns)
 		if err != nil {
 			findings = append(findings, model.Finding{Severity: "error", Code: "PROVIDER_QUERY_FAILED", Message: fmt.Sprintf("provider %s registration check failed: %v", ns, err)})
@@ -370,6 +351,57 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 	}
 
 	return findings, nil
+}
+
+func runExistenceCheck(ctx context.Context, client *AzureClient, candidate model.Candidate) []model.Finding {
+	path, missing, ok := BuildExistsPath(candidate)
+	switch {
+	case !ok:
+		return []model.Finding{{
+			Severity: "warn",
+			Code:     "RESOURCE_EXISTS_CHECK_UNSUPPORTED",
+			Message:  fmt.Sprintf("resource existence check is not supported for %s", candidate.ResourceType),
+			Resource: candidate.Address,
+			Detail: map[string]any{
+				"resource_type": candidate.ResourceType,
+			},
+		}}
+	case len(missing) > 0:
+		return []model.Finding{{
+			Severity: "warn",
+			Code:     "RESOURCE_EXISTS_CHECK_INCOMPLETE",
+			Message:  fmt.Sprintf("resource existence check skipped; missing fields: %s", strings.Join(missing, ", ")),
+			Resource: candidate.Address,
+			Detail: map[string]any{
+				"missing_fields": missing,
+			},
+		}}
+	}
+
+	status, err := client.ProbePath(ctx, "GET", path)
+	switch {
+	case err != nil:
+		return []model.Finding{{
+			Severity: "error",
+			Code:     "RESOURCE_EXISTS_CHECK_FAILED",
+			Message:  fmt.Sprintf("resource existence probe failed: %v", err),
+			Resource: candidate.Address,
+		}}
+	case status == http.StatusNotFound:
+		return nil
+	case status >= 200 && status < 300:
+		return []model.Finding{{Severity: "warn", Code: "RESOURCE_EXISTS", Message: "resource already exists", Resource: candidate.Address}}
+	default:
+		return []model.Finding{{
+			Severity: "error",
+			Code:     "RESOURCE_EXISTS_CHECK_FAILED",
+			Message:  fmt.Sprintf("resource existence probe returned unexpected status: %d", status),
+			Resource: candidate.Address,
+			Detail: map[string]any{
+				"status_code": status,
+			},
+		}}
+	}
 }
 
 func isLocationAvailable(locations map[string]struct{}, location string) bool {
@@ -445,5 +477,9 @@ func ResolveSubscriptionFromCLI() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	subscriptionID := strings.TrimSpace(string(out))
+	if subscriptionID == "" {
+		return "", fmt.Errorf("azure cli returned empty subscription id")
+	}
+	return subscriptionID, nil
 }
