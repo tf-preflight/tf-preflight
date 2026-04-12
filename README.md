@@ -47,6 +47,8 @@ From a remote URL (after setting the repo):
 PRE_FLIGHT_REPO=tf-preflight/tf-preflight bash -c 'curl -fsSL https://raw.githubusercontent.com/tf-preflight/tf-preflight/main/scripts/install.sh | bash'
 ```
 
+`PRE_FLIGHT_VERSION` defaults to resolving the repository's latest release tag via the GitHub API. If a pinned tag is not provided and release download fails (for example if assets are not published yet), the script falls back to cloning the repository and building from source.
+
 You can also pin a versioned release:
 
 ```bash
