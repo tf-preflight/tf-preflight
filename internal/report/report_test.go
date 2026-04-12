@@ -1,31 +1,173 @@
 package report
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tf-preflight/tf-preflight/internal/model"
 )
 
-func TestBuildReportAndFailureDecision(t *testing.T) {
-	report := BuildReport("/tmp/project", "/tmp/plan.json", false, "123", nil, []model.Finding{
-		{Severity: "warn", Code: "UNSUPPORTED_RESOURCE_TYPE", Message: "x"},
-		{Severity: "error", Code: "INVALID_LOCATION", Message: "y"},
+func TestBuildReportDecisionPass(t *testing.T) {
+	report := BuildReport("/tmp/project", "/tmp/plan.json", false, "sub-123", []model.Candidate{
+		{Action: "create"},
+	}, nil)
+
+	if report.Decision.Result != "PASS" {
+		t.Fatalf("expected PASS, got %s", report.Decision.Result)
+	}
+	if !report.Decision.Deployable {
+		t.Fatal("expected deployable to remain true")
+	}
+	if report.Decision.Confidence != "HIGH" {
+		t.Fatalf("expected HIGH confidence, got %s", report.Decision.Confidence)
+	}
+	if report.Decision.Blockers != 0 || report.Decision.Degraded != 0 || report.Decision.Advisories != 0 {
+		t.Fatalf("unexpected decision counts: %+v", report.Decision)
+	}
+}
+
+func TestBuildReportDecisionBlocked(t *testing.T) {
+	report := BuildReport("/tmp/project", "/tmp/plan.json", false, "sub-123", nil, []model.Finding{
+		{Severity: "error", Code: "INVALID_LOCATION", Message: "bad location"},
 	})
 
-	if report.Summary.Errors != 1 {
-		t.Fatalf("expected one error, got %d", report.Summary.Errors)
+	if report.Decision.Result != "BLOCKED" {
+		t.Fatalf("expected BLOCKED, got %s", report.Decision.Result)
 	}
-	if report.Summary.Warnings != 1 {
-		t.Fatalf("expected one warning, got %d", report.Summary.Warnings)
+	if report.Decision.Deployable {
+		t.Fatal("expected deployable to be false")
+	}
+	if report.Decision.Confidence != "HIGH" {
+		t.Fatalf("expected HIGH confidence without degraded checks, got %s", report.Decision.Confidence)
+	}
+	if report.Decision.Blockers != 1 || report.Decision.Degraded != 0 || report.Decision.Advisories != 0 {
+		t.Fatalf("unexpected decision counts: %+v", report.Decision)
+	}
+	if report.Findings[0].Category != "BLOCKER" {
+		t.Fatalf("expected BLOCKER category, got %s", report.Findings[0].Category)
 	}
 	if !IsFailure(report.Findings, "error") {
 		t.Fatalf("expected failure for error threshold")
 	}
-	if !IsFailure(report.Findings, "warn") {
-		t.Fatalf("expected failure for warn threshold")
+}
+
+func TestBuildReportDecisionDegraded(t *testing.T) {
+	report := BuildReport("/tmp/project", "/tmp/plan.json", false, "sub-123", nil, []model.Finding{
+		{Severity: "error", Code: "RESOURCE_EXISTS_CHECK_FAILED", Message: "backend unavailable"},
+		{Severity: "warn", Code: "QUOTA_UNKNOWN", Message: "quota endpoint unavailable"},
+	})
+
+	if report.Decision.Result != "DEGRADED" {
+		t.Fatalf("expected DEGRADED, got %s", report.Decision.Result)
+	}
+	if !report.Decision.Deployable {
+		t.Fatal("expected degraded report to remain not blocked")
+	}
+	if report.Decision.Confidence != "DEGRADED" {
+		t.Fatalf("expected DEGRADED confidence, got %s", report.Decision.Confidence)
+	}
+	if report.Decision.Blockers != 0 || report.Decision.Degraded != 2 || report.Decision.Advisories != 0 {
+		t.Fatalf("unexpected decision counts: %+v", report.Decision)
+	}
+	for _, finding := range report.Findings {
+		if finding.Category != "DEGRADED" {
+			t.Fatalf("expected DEGRADED finding category, got %+v", report.Findings)
+		}
+	}
+	if !IsFailure(report.Findings, "error") {
+		t.Fatalf("expected exit failure behavior to remain true for severity=error degraded findings")
+	}
+}
+
+func TestBuildReportDecisionMixed(t *testing.T) {
+	report := BuildReport("/tmp/project", "/tmp/plan.json", false, "sub-123", nil, []model.Finding{
+		{Severity: "warn", Code: "RESOURCE_EXISTS", Message: "already exists", Resource: "a"},
+		{Severity: "error", Code: "PROVIDER_QUERY_FAILED", Message: "lookup failed", Resource: "b"},
+		{Severity: "error", Code: "INVALID_LOCATION", Message: "blocked", Resource: "c"},
+	})
+
+	if report.Decision.Result != "BLOCKED" {
+		t.Fatalf("expected BLOCKED, got %s", report.Decision.Result)
+	}
+	if report.Decision.Deployable {
+		t.Fatal("expected deployable to be false")
+	}
+	if report.Decision.Confidence != "DEGRADED" {
+		t.Fatalf("expected DEGRADED confidence, got %s", report.Decision.Confidence)
+	}
+	if report.Decision.Blockers != 1 || report.Decision.Degraded != 1 || report.Decision.Advisories != 1 {
+		t.Fatalf("unexpected decision counts: %+v", report.Decision)
+	}
+
+	gotCodes := []string{report.Findings[0].Code, report.Findings[1].Code, report.Findings[2].Code}
+	wantCodes := []string{"INVALID_LOCATION", "PROVIDER_QUERY_FAILED", "RESOURCE_EXISTS"}
+	for i := range wantCodes {
+		if gotCodes[i] != wantCodes[i] {
+			t.Fatalf("unexpected finding order: got %v want %v", gotCodes, wantCodes)
+		}
+	}
+}
+
+func TestWriteJSONIncludesDecisionSummary(t *testing.T) {
+	report := BuildReport("/tmp/project", "/tmp/plan.json", false, "sub-123", nil, []model.Finding{
+		{Severity: "warn", Code: "QUOTA_UNKNOWN", Message: "quota unavailable"},
+	})
+
+	outPath := filepath.Join(t.TempDir(), "report.json")
+	if err := WriteJSON(report, outPath); err != nil {
+		t.Fatalf("unexpected json write error: %v", err)
+	}
+
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("unexpected read error: %v", err)
+	}
+
+	var decoded struct {
+		Decision model.Decision  `json:"decision"`
+		Findings []model.Finding `json:"findings"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unexpected decode error: %v", err)
+	}
+	if decoded.Decision.Result != "DEGRADED" {
+		t.Fatalf("expected DEGRADED decision, got %+v", decoded.Decision)
+	}
+	if decoded.Decision.Degraded != 1 || decoded.Decision.Blockers != 0 || decoded.Decision.Advisories != 0 {
+		t.Fatalf("unexpected decision counts: %+v", decoded.Decision)
+	}
+	if len(decoded.Findings) != 1 || decoded.Findings[0].Category != "DEGRADED" {
+		t.Fatalf("expected categorized findings in json, got %+v", decoded.Findings)
+	}
+}
+
+func TestWriteTextIncludesFinalDecisionSection(t *testing.T) {
+	report := BuildReport("/tmp/project", "/tmp/plan.json", false, "sub-123", nil, []model.Finding{
+		{Severity: "warn", Code: "RESOURCE_EXISTS", Message: "already exists", Resource: "azurerm_resource_group.rg"},
+		{Severity: "warn", Code: "QUOTA_UNKNOWN", Message: "quota unavailable", Resource: "azurerm_service_plan.asp"},
+	})
+
+	var buf bytes.Buffer
+	writeText(&buf, report)
+	text := buf.String()
+
+	for _, needle := range []string{
+		"Decision:",
+		"Result:",
+		"ADVISORY",
+		"Confidence:",
+		"Degraded checks:",
+		"CLASS",
+		"DEGRADED",
+		"ADVISORY",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("expected text output to contain %q, got:\n%s", needle, text)
+		}
 	}
 }
 

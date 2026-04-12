@@ -35,6 +35,7 @@ type Finding struct {
 	Code     string         `json:"code"`
 	Message  string         `json:"message"`
 	Resource string         `json:"resource,omitempty"`
+	Category string         `json:"category,omitempty"`
 	Detail   map[string]any `json:"detail,omitempty"`
 }
 
@@ -46,6 +47,7 @@ type Report struct {
 	AutoPlan     bool        `json:"auto_plan"`
 	Subscription string      `json:"subscription"`
 	Summary      Summary     `json:"summary"`
+	Decision     Decision    `json:"decision"`
 	Candidates   []Candidate `json:"candidates"`
 	Findings     []Finding   `json:"findings"`
 }
@@ -60,6 +62,15 @@ type Summary struct {
 	} `json:"actions"`
 	Errors   int `json:"errors"`
 	Warnings int `json:"warnings"`
+}
+
+type Decision struct {
+	Result     string `json:"result"`
+	Deployable bool   `json:"deployable"`
+	Confidence string `json:"confidence"`
+	Blockers   int    `json:"blockers"`
+	Degraded   int    `json:"degraded"`
+	Advisories int    `json:"advisories"`
 }
 
 type ImportRecommendation struct {

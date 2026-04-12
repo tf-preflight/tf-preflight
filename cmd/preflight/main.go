@@ -176,7 +176,6 @@ func runScan(opts model.CommandOptions) error {
 
 	progress.Message("building report")
 	reportObj := report.BuildReport(absDir, finalPlanPath, opts.AutoPlan, subscriptionID, candidates, findings)
-	reportObj.Findings = report.SortedFindings(findings)
 	progress.Done("ready")
 
 	if opts.Output == "json" {
