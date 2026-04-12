@@ -10,6 +10,7 @@ import (
 
 type moduleInstance struct {
 	AddressPrefix string
+	Key           string
 	Variables     map[string]any
 }
 
@@ -33,7 +34,7 @@ func mergeLocalModuleCandidates(ctx *HCLContext) error {
 			if err != nil {
 				return fmt.Errorf("failed parsing module %q: %w", mod.Name, err)
 			}
-			mergeChildContext(ctx, child)
+			mergeChildContext(ctx, child, call, instance)
 		}
 	}
 	return nil
@@ -44,6 +45,7 @@ func expandModuleInstances(ctx *HCLContext, call moduleCall) []moduleInstance {
 	if !hasForEach {
 		return []moduleInstance{{
 			AddressPrefix: qualifyModulePrefix(ctx.AddressPrefix, call.Name, ""),
+			Key:           "",
 			Variables:     evaluateModuleInputs(ctx, call.Attributes),
 		}}
 	}
@@ -65,6 +67,7 @@ func expandModuleInstances(ctx *HCLContext, call moduleCall) []moduleInstance {
 		instanceCtx.EachValue = item.value
 		instances = append(instances, moduleInstance{
 			AddressPrefix: qualifyModulePrefix(ctx.AddressPrefix, call.Name, item.key),
+			Key:           item.key,
 			Variables:     evaluateModuleInputs(&instanceCtx, call.Attributes),
 		})
 	}
@@ -131,12 +134,26 @@ func isMetaModuleArgument(name string) bool {
 	}
 }
 
-func mergeChildContext(parent, child *HCLContext) {
+func mergeChildContext(parent, child *HCLContext, call moduleCall, instance moduleInstance) {
 	if parent == nil || child == nil {
 		return
 	}
 	for address, candidate := range child.CandidateMap {
 		parent.CandidateMap[address] = candidate
+	}
+	if len(child.Outputs) > 0 {
+		moduleValue, _ := parent.ModuleValues[call.Name].(map[string]any)
+		if moduleValue == nil {
+			moduleValue = map[string]any{}
+		}
+		if instance.Key == "" {
+			for key, value := range child.Outputs {
+				moduleValue[key] = value
+			}
+		} else {
+			moduleValue[instance.Key] = cloneAnyMap(child.Outputs)
+		}
+		parent.ModuleValues[call.Name] = moduleValue
 	}
 	parent.Findings = append(parent.Findings, child.Findings...)
 	parent.Candidates = nil

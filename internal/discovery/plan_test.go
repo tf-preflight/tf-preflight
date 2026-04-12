@@ -448,6 +448,143 @@ resource "azurerm_traffic_manager_azure_endpoint" "endpoint" {
 	}
 }
 
+func TestCandidatesFromPlanMergesIndexedModuleOutputDerivedTrafficManagerMetadata(t *testing.T) {
+	dir := t.TempDir()
+
+	resourceGroupDir := filepath.Join(dir, "modules", "resource_group")
+	if err := os.MkdirAll(resourceGroupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resourceGroupDir, "main.tf"), []byte(`
+resource "azurerm_resource_group" "rg" {
+  name     = var.rg_name
+  location = var.rg_location
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resourceGroupDir, "variables.tf"), []byte(`
+variable "rg_name" {}
+variable "rg_location" {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resourceGroupDir, "outputs.tf"), []byte(`
+output "rg_details" {
+  value = {
+    name     = azurerm_resource_group.rg.name
+    location = azurerm_resource_group.rg.location
+  }
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	trafficManagerDir := filepath.Join(dir, "modules", "traffic_manager")
+	if err := os.MkdirAll(trafficManagerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trafficManagerDir, "main.tf"), []byte(`
+resource "azurerm_traffic_manager_profile" "tm_profile" {
+  name                = var.name
+  resource_group_name = var.resource_group_name
+}
+
+resource "azurerm_traffic_manager_azure_endpoint" "tm_endpoint" {
+  for_each = var.endpoints
+
+  name       = each.value.name
+  profile_id = azurerm_traffic_manager_profile.tm_profile.id
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trafficManagerDir, "variables.tf"), []byte(`
+variable "name" {}
+variable "resource_group_name" {}
+variable "endpoints" {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`
+module "resource_group" {
+  for_each = var.resource_groups
+  source   = "./modules/resource_group"
+
+  rg_name     = each.value.name
+  rg_location = each.value.location
+}
+
+module "traffic_manager" {
+  source              = "./modules/traffic_manager"
+  name                = var.traffic_manager.name
+  resource_group_name = module.resource_group[var.traffic_manager.rg_key].rg_details.name
+  endpoints = {
+    app1 = {
+      name = "endpoint-app1"
+    }
+  }
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "variables.tf"), []byte(`
+variable "resource_groups" {}
+variable "traffic_manager" {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "terraform.tfvars"), []byte(`
+resource_groups = {
+  rg3 = {
+    name     = "rg-net"
+    location = "West Europe"
+  }
+}
+
+traffic_manager = {
+  name   = "tm-profile"
+  rg_key = "rg3"
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hcl, err := ParseDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cands, err := CandidatesFromPlan(planBlob(t, []map[string]any{
+		{
+			"address": `module.traffic_manager.azurerm_traffic_manager_azure_endpoint.tm_endpoint["app1"]`,
+			"type":    "azurerm_traffic_manager_azure_endpoint",
+			"name":    "tm_endpoint",
+			"mode":    "managed",
+			"change": map[string]any{
+				"actions": []string{"create"},
+				"after": map[string]any{
+					"name": "endpoint-app1",
+				},
+				"after_unknown": map[string]any{},
+			},
+		},
+	}), hcl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cands[0].Source; got != "merged" {
+		t.Fatalf("expected merged source, got %s", got)
+	}
+	if got := cands[0].ResourceGroup; got != "rg-net" {
+		t.Fatalf("expected merged resource group rg-net, got %s", got)
+	}
+	if got := cands[0].TrafficManagerProfile; got != "tm-profile" {
+		t.Fatalf("expected merged traffic manager profile tm-profile, got %s", got)
+	}
+}
+
 func planBlob(t *testing.T, changes []map[string]any) []byte {
 	t.Helper()
 

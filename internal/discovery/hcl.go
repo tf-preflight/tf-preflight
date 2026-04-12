@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -19,6 +20,9 @@ import (
 type HCLContext struct {
 	Variables           map[string]any
 	Locals              map[string]any
+	Outputs             map[string]any
+	OutputExprs         map[string]hcl.Expression
+	ModuleValues        map[string]any
 	Subscription        string
 	RootDir             string
 	AddressPrefix       string
@@ -56,6 +60,9 @@ func parseDirectory(root string, opts parseOptions) (*HCLContext, error) {
 	ctx := &HCLContext{
 		Variables:           cloneAnyMap(opts.SeedVariables),
 		Locals:              map[string]any{},
+		Outputs:             map[string]any{},
+		OutputExprs:         map[string]hcl.Expression{},
+		ModuleValues:        map[string]any{},
 		Subscription:        opts.Subscription,
 		RootDir:             root,
 		AddressPrefix:       opts.AddressPrefix,
@@ -79,6 +86,9 @@ func parseDirectory(root string, opts parseOptions) (*HCLContext, error) {
 			files = append(files, filepath.Join(root, entry.Name()))
 		}
 	}
+	if err := loadAutoVariableFiles(root, ctx); err != nil {
+		return nil, err
+	}
 
 	p := hclparse.NewParser()
 	for _, path := range files {
@@ -94,6 +104,7 @@ func parseDirectory(root string, opts parseOptions) (*HCLContext, error) {
 				{Type: "variable", LabelNames: []string{"name"}},
 				{Type: "locals"},
 				{Type: "module", LabelNames: []string{"name"}},
+				{Type: "output", LabelNames: []string{"name"}},
 			},
 		}
 		content, _, _ := file.Body.PartialContent(blockSchema)
@@ -106,12 +117,14 @@ func parseDirectory(root string, opts parseOptions) (*HCLContext, error) {
 		parseProvider(content, ctx)
 		parseResources(content, ctx)
 		parseModules(content, ctx, path)
+		parseOutputs(content, ctx)
 	}
 
 	validateModuleImports(ctx)
 	if err := mergeLocalModuleCandidates(ctx); err != nil {
 		return nil, err
 	}
+	evaluateOutputs(ctx)
 
 	for _, c := range ctx.CandidateMap {
 		ctx.Candidates = append(ctx.Candidates, c)
@@ -221,6 +234,44 @@ func parseModules(content *hcl.BodyContent, ctx *HCLContext, filePath string) {
 			Message:  fmt.Sprintf("module %q source is dynamic or unsupported and could not be resolved statically", name),
 			Resource: name,
 		})
+	}
+}
+
+func parseOutputs(content *hcl.BodyContent, ctx *HCLContext) {
+	for _, b := range content.Blocks.OfType("output") {
+		if len(b.Labels) != 1 {
+			continue
+		}
+		name := b.Labels[0]
+		blockContent, _, _ := b.Body.PartialContent(&hcl.BodySchema{
+			Attributes: []hcl.AttributeSchema{
+				{Name: "value"},
+			},
+		})
+		if blockContent == nil {
+			continue
+		}
+		if attr, ok := blockContent.Attributes["value"]; ok {
+			ctx.OutputExprs[name] = attr.Expr
+		}
+	}
+}
+
+func evaluateOutputs(ctx *HCLContext) {
+	if ctx == nil || len(ctx.OutputExprs) == 0 {
+		return
+	}
+	names := make([]string, 0, len(ctx.OutputExprs))
+	for name := range ctx.OutputExprs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for pass := 0; pass < 3; pass++ {
+		for _, name := range names {
+			if value, ok := evalExpression(ctx.OutputExprs[name], ctx); ok {
+				ctx.Outputs[name] = value
+			}
+		}
 	}
 }
 
@@ -554,6 +605,56 @@ func cloneAnyMap(in map[string]any) map[string]any {
 	return out
 }
 
+func loadAutoVariableFiles(root string, ctx *HCLContext) error {
+	files := []string{}
+	for _, candidate := range []string{
+		filepath.Join(root, "terraform.tfvars"),
+		filepath.Join(root, "terraform.tfvars.json"),
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			files = append(files, candidate)
+		}
+	}
+	matches, err := filepath.Glob(filepath.Join(root, "*.auto.tfvars"))
+	if err != nil {
+		return err
+	}
+	files = append(files, matches...)
+
+	for _, path := range files {
+		if strings.HasSuffix(path, ".json") {
+			continue
+		}
+		if err := loadVariableFile(path, ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func loadVariableFile(path string, ctx *HCLContext) error {
+	parser := hclparse.NewParser()
+	file, diags := parser.ParseHCLFile(path)
+	if diags.HasErrors() {
+		return diags
+	}
+	attrs, diags := file.Body.JustAttributes()
+	if diags.HasErrors() {
+		return diags
+	}
+	names := make([]string, 0, len(attrs))
+	for name := range attrs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if value, ok := evalExpression(attrs[name].Expr, ctx); ok {
+			ctx.Variables[name] = value
+		}
+	}
+	return nil
+}
+
 func setContextSubscription(ctx *HCLContext, subscription string) {
 	if ctx == nil {
 		return
@@ -616,6 +717,14 @@ func evalExpression(expr hcl.Expression, ctx *HCLContext) (any, bool) {
 		return strings.Join(parts, ""), true
 	case *hclsyntax.ScopeTraversalExpr:
 		return resolveTraversal(v, ctx)
+	case *hclsyntax.IndexExpr:
+		return evalIndexExpression(v, ctx)
+	case *hclsyntax.RelativeTraversalExpr:
+		source, ok := evalExpression(v.Source, ctx)
+		if !ok {
+			return nil, false
+		}
+		return applyRelativeTraversal(source, v.Traversal)
 	case *hclsyntax.FunctionCallExpr:
 		return evalFunction(v, ctx)
 	case *hclsyntax.ParenthesesExpr:
@@ -792,6 +901,10 @@ func resolveTraversal(expr *hclsyntax.ScopeTraversalExpr, ctx *HCLContext) (any,
 		if val, ok := ctx.Locals[key]; ok {
 			return traverseResolvedValue(val, parts[2:])
 		}
+	case "module":
+		if val, ok := ctx.ModuleValues[key]; ok {
+			return traverseResolvedValue(val, parts[2:])
+		}
 	case "each":
 		switch key {
 		case "key":
@@ -801,6 +914,76 @@ func resolveTraversal(expr *hclsyntax.ScopeTraversalExpr, ctx *HCLContext) (any,
 		}
 	}
 	return resolveResourceTraversal(parts, ctx)
+}
+
+func evalIndexExpression(expr *hclsyntax.IndexExpr, ctx *HCLContext) (any, bool) {
+	collection, ok := evalExpression(expr.Collection, ctx)
+	if !ok {
+		return nil, false
+	}
+	keyValue, ok := evalExpression(expr.Key, ctx)
+	if !ok {
+		return nil, false
+	}
+	keyString, ok := toString(keyValue)
+	if !ok {
+		return nil, false
+	}
+
+	switch typed := collection.(type) {
+	case map[string]any:
+		value, ok := typed[keyString]
+		return value, ok
+	case []any:
+		index, ok := toInt(keyValue)
+		if !ok || index < 0 || index >= len(typed) {
+			return nil, false
+		}
+		return typed[index], true
+	default:
+		return nil, false
+	}
+}
+
+func applyRelativeTraversal(value any, traversal hcl.Traversal) (any, bool) {
+	current := value
+	for _, step := range traversal {
+		switch typed := step.(type) {
+		case hcl.TraverseAttr:
+			next, ok := traverseResolvedValue(current, []string{typed.Name})
+			if !ok {
+				return nil, false
+			}
+			current = next
+		case hcl.TraverseIndex:
+			key, ok := toString(ctyToGo(typed.Key))
+			if !ok {
+				return nil, false
+			}
+			switch obj := current.(type) {
+			case map[string]any:
+				next, ok := obj[key]
+				if !ok {
+					return nil, false
+				}
+				current = next
+			case []any:
+				index, ok := toInt(ctyToGo(typed.Key))
+				if !ok || index < 0 || index >= len(obj) {
+					return nil, false
+				}
+				current = obj[index]
+			default:
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+	}
+	if current == nil {
+		return nil, false
+	}
+	return current, true
 }
 
 func resolveResourceTraversal(parts []string, ctx *HCLContext) (any, bool) {
@@ -932,6 +1115,19 @@ func toString(v any) (string, bool) {
 		return fmt.Sprintf("%t", x), true
 	}
 	return "", false
+}
+
+func toInt(v any) (int, bool) {
+	switch x := v.(type) {
+	case int:
+		return x, true
+	case int64:
+		return int(x), true
+	case float64:
+		return int(x), true
+	default:
+		return 0, false
+	}
 }
 
 func pickSKU(v any) (string, bool) {

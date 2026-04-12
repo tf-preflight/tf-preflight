@@ -53,42 +53,46 @@ func parseTrafficManagerProfileID(raw string) (string, string, bool) {
 }
 
 func buildCandidateResourceID(candidate model.Candidate) (string, bool) {
+	subscriptionID := candidate.SubscriptionID
+	if strings.TrimSpace(subscriptionID) == "" {
+		subscriptionID = "__tfpreflight_unknown__"
+	}
 	switch candidate.ResourceType {
 	case "azurerm_resource_group":
-		if strings.TrimSpace(candidate.SubscriptionID) == "" || strings.TrimSpace(candidate.Name) == "" {
+		if strings.TrimSpace(candidate.Name) == "" {
 			return "", false
 		}
-		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s", candidate.SubscriptionID, candidate.Name), true
+		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s", subscriptionID, candidate.Name), true
 	case "azurerm_service_plan":
-		if missingCandidateFields(candidate.SubscriptionID, candidate.ResourceGroup, candidate.Name) {
+		if missingCandidateFields(candidate.ResourceGroup, candidate.Name) {
 			return "", false
 		}
-		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/serverFarms/%s", candidate.SubscriptionID, candidate.ResourceGroup, candidate.Name), true
+		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/serverFarms/%s", subscriptionID, candidate.ResourceGroup, candidate.Name), true
 	case "azurerm_windows_web_app", "azurerm_linux_web_app":
-		if missingCandidateFields(candidate.SubscriptionID, candidate.ResourceGroup, candidate.Name) {
+		if missingCandidateFields(candidate.ResourceGroup, candidate.Name) {
 			return "", false
 		}
-		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s", candidate.SubscriptionID, candidate.ResourceGroup, candidate.Name), true
+		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s", subscriptionID, candidate.ResourceGroup, candidate.Name), true
 	case "azurerm_traffic_manager_profile":
-		if missingCandidateFields(candidate.SubscriptionID, candidate.ResourceGroup, candidate.Name) {
+		if missingCandidateFields(candidate.ResourceGroup, candidate.Name) {
 			return "", false
 		}
-		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/trafficManagerProfiles/%s", candidate.SubscriptionID, candidate.ResourceGroup, candidate.Name), true
+		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/trafficManagerProfiles/%s", subscriptionID, candidate.ResourceGroup, candidate.Name), true
 	case "azurerm_virtual_network":
-		if missingCandidateFields(candidate.SubscriptionID, candidate.ResourceGroup, candidate.Name) {
+		if missingCandidateFields(candidate.ResourceGroup, candidate.Name) {
 			return "", false
 		}
-		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s", candidate.SubscriptionID, candidate.ResourceGroup, candidate.Name), true
+		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s", subscriptionID, candidate.ResourceGroup, candidate.Name), true
 	case "azurerm_subnet":
-		if missingCandidateFields(candidate.SubscriptionID, candidate.ResourceGroup, candidate.VirtualNetwork, candidate.Name) {
+		if missingCandidateFields(candidate.ResourceGroup, candidate.VirtualNetwork, candidate.Name) {
 			return "", false
 		}
-		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s", candidate.SubscriptionID, candidate.ResourceGroup, candidate.VirtualNetwork, candidate.Name), true
+		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s", subscriptionID, candidate.ResourceGroup, candidate.VirtualNetwork, candidate.Name), true
 	case "azurerm_mssql_server":
-		if missingCandidateFields(candidate.SubscriptionID, candidate.ResourceGroup, candidate.Name) {
+		if missingCandidateFields(candidate.ResourceGroup, candidate.Name) {
 			return "", false
 		}
-		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Sql/servers/%s", candidate.SubscriptionID, candidate.ResourceGroup, candidate.Name), true
+		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Sql/servers/%s", subscriptionID, candidate.ResourceGroup, candidate.Name), true
 	default:
 		return "", false
 	}
