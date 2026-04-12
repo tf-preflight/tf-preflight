@@ -40,6 +40,21 @@ func TestIsQuotaExceeded(t *testing.T) {
 	}
 }
 
+func TestIsQuotaExceeded_MatchesSubstringMetric(t *testing.T) {
+	items := []usageResponseItem{
+		{Name: struct {
+			Value string `json:"value"`
+		}{Value: "Cores usage in West Europe"}, CurrentValue: 250, Limit: 250},
+	}
+	exceeded, metric := isQuotaExceeded(items, []string{"cores usage"})
+	if !exceeded {
+		t.Fatalf("expected exceeded")
+	}
+	if metric != "Cores usage in West Europe" {
+		t.Fatalf("unexpected metric %s", metric)
+	}
+}
+
 func TestBuildImportID_SupportedResourceTypes(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -361,7 +376,7 @@ func TestRunChecks_SurfacesQuotaLookupFailure(t *testing.T) {
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/serverFarms/asp-01"):
 			http.NotFound(w, r)
 		case strings.HasPrefix(r.URL.EscapedPath(), "/subscriptions/sub-123/providers/Microsoft.Web/locations/West%20Europe/usages"):
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(http.StatusBadRequest)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web"):
 			writeJSON(w, `{"registrationState":"Registered"}`)
 		default:
@@ -383,7 +398,7 @@ func TestRunChecks_SurfacesQuotaLookupFailure(t *testing.T) {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
 
-	assertFindingCodes(t, findings, []string{"QUOTA_UNKNOWN"})
+	assertFindingCodes(t, findings, []string{"QUOTA_CHECK_UNSUPPORTED"})
 }
 
 func TestRunChecks_SurfacesUnsupportedExistenceMapping(t *testing.T) {
@@ -423,7 +438,7 @@ func TestRunChecks_SurfacesIncompleteExistenceMapping(t *testing.T) {
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
 			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
 		case strings.HasPrefix(r.URL.EscapedPath(), "/subscriptions/sub-123/providers/Microsoft.Web/locations/West%20Europe/usages"):
-			writeJSON(w, `{"value":[{"name":{"value":"sites"},"currentValue":1,"limit":10}]}`)
+			writeJSON(w, `{"value":[{"name":{"value":"Cores usage in West Europe"},"currentValue":1,"limit":10}]}`)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web"):
 			writeJSON(w, `{"registrationState":"Registered"}`)
 		default:
@@ -596,7 +611,7 @@ func TestRunChecks_AppServiceQuotaUsesCanonicalLocationDisplayName(t *testing.T)
 			http.NotFound(w, r)
 		case strings.HasPrefix(r.URL.EscapedPath(), "/subscriptions/sub-123/providers/Microsoft.Web/locations/West%20Europe/usages"):
 			quotaCalls++
-			writeJSON(w, `{"value":[{"name":{"value":"sites"},"currentValue":1,"limit":10}]}`)
+			writeJSON(w, `{"value":[{"name":{"value":"Cores usage in West Europe"},"currentValue":1,"limit":10}]}`)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web"):
 			writeJSON(w, `{"registrationState":"Registered"}`)
 		default:
@@ -629,11 +644,50 @@ func TestRunChecks_AppServiceQuotaUsesCanonicalLocationDisplayName(t *testing.T)
 	if err != nil {
 		t.Fatalf("unexpected RunChecks error: %v", err)
 	}
-	if quotaCalls != 2 {
-		t.Fatalf("expected 2 Microsoft.Web quota calls using display location, got %d", quotaCalls)
+	if quotaCalls != 1 {
+		t.Fatalf("expected 1 Microsoft.Web quota call using display location, got %d", quotaCalls)
 	}
 	if len(findings) != 0 {
 		t.Fatalf("expected no degraded findings for supported App Service quota checks, got %+v", findings)
+	}
+}
+
+func TestRunChecks_WindowsWebAppSkipsMicrosoftWebQuotaCheck(t *testing.T) {
+	quotaCalls := 0
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/sites/app-win"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.EscapedPath(), "/subscriptions/sub-123/providers/Microsoft.Web/locations/West%20Europe/usages"):
+			quotaCalls++
+			writeJSON(w, `{"value":[{"name":{"value":"Cores usage in West Europe"},"currentValue":1,"limit":10}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_windows_web_app.app",
+		ResourceType:   "azurerm_windows_web_app",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		ResourceGroup:  "rg-app",
+		Name:           "app-win",
+		Location:       "westeurope",
+	}}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+	if quotaCalls != 0 {
+		t.Fatalf("expected no Microsoft.Web quota calls for web apps, got %d", quotaCalls)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected no degraded findings for web app quota skipping, got %+v", findings)
 	}
 }
 
@@ -647,7 +701,7 @@ func TestRunChecks_MixedResultsRemainDeterministic(t *testing.T) {
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/serverFarms/asp-01"):
 			http.NotFound(w, r)
 		case strings.HasPrefix(r.URL.EscapedPath(), "/subscriptions/sub-123/providers/Microsoft.Web/locations/West%20Europe/usages"):
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(http.StatusBadRequest)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Resources"):
 			writeJSON(w, `{"registrationState":"NotRegistered"}`)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web"):
@@ -690,7 +744,7 @@ func TestRunChecks_MixedResultsRemainDeterministic(t *testing.T) {
 
 	assertFindingCodes(t, findings, []string{
 		"RESOURCE_EXISTS",
-		"QUOTA_UNKNOWN",
+		"QUOTA_CHECK_UNSUPPORTED",
 		"UNSUPPORTED_RESOURCE_TYPE",
 		"PROVIDER_NOT_REGISTERED",
 		"PROVIDER_QUERY_FAILED",

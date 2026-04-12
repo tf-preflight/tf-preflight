@@ -114,7 +114,7 @@ func TestBuildReportDecisionMixed(t *testing.T) {
 
 func TestWriteJSONIncludesDecisionSummary(t *testing.T) {
 	report := BuildReport("/tmp/project", "/tmp/plan.json", false, "sub-123", nil, []model.Finding{
-		{Severity: "warn", Code: "QUOTA_UNKNOWN", Message: "quota unavailable"},
+		{Severity: "warn", Code: "QUOTA_CHECK_UNSUPPORTED", Message: "quota unsupported"},
 	})
 
 	outPath := filepath.Join(t.TempDir(), "report.json")

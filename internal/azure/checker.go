@@ -3,6 +3,7 @@ package azure
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -39,22 +40,18 @@ var resourceMeta = map[string]ResourceMeta{
 		Namespace:   "Microsoft.Web",
 		ExistsPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/serverFarms/%s?api-version=2023-01-01",
 		ImportPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/serverFarms/%s",
-		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Web/locations/%s/usages?api-version=2022-03-01",
-		QuotaChecks: []string{"sites", "total sites", "serverfams"},
+		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Web/locations/%s/usages?api-version=2025-03-01",
+		QuotaChecks: []string{"cores usage"},
 	},
 	"azurerm_windows_web_app": {
-		Namespace:   "Microsoft.Web",
-		ExistsPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s?api-version=2023-01-01",
-		ImportPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s",
-		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Web/locations/%s/usages?api-version=2022-03-01",
-		QuotaChecks: []string{"sites", "total sites", "app service plans"},
+		Namespace:  "Microsoft.Web",
+		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s?api-version=2023-01-01",
+		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s",
 	},
 	"azurerm_linux_web_app": {
-		Namespace:   "Microsoft.Web",
-		ExistsPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s?api-version=2023-01-01",
-		ImportPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s",
-		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Web/locations/%s/usages?api-version=2022-03-01",
-		QuotaChecks: []string{"sites", "total sites", "app service plans"},
+		Namespace:  "Microsoft.Web",
+		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s?api-version=2023-01-01",
+		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s",
 	},
 	"azurerm_traffic_manager_profile": {
 		Namespace:   "Microsoft.Network",
@@ -212,6 +209,15 @@ type providerResponse struct {
 	RegistrationState string `json:"registrationState"`
 }
 
+type azureAPIError struct {
+	StatusCode int
+	Status     string
+}
+
+func (e *azureAPIError) Error() string {
+	return fmt.Sprintf("azure api error: %s", e.Status)
+}
+
 type usageResponse struct {
 	Value []struct {
 		Name struct {
@@ -264,7 +270,7 @@ func (c *AzureClient) callJSON(ctx context.Context, method, path string, out any
 		return fmt.Errorf("azure unauthorized (check login or token)")
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("azure api error: %s", res.Status)
+		return &azureAPIError{StatusCode: res.StatusCode, Status: res.Status}
 	}
 	if out == nil {
 		return nil
@@ -348,15 +354,7 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 
 		if candidate.Action == "create" || candidate.Action == "update" || candidate.Action == "replace" {
 			findings = append(findings, runExistenceCheck(ctx, client, candidate)...)
-			if meta.QuotaPath != "" && candidate.Location != "" {
-				q := fmt.Sprintf(meta.QuotaPath, candidate.SubscriptionID, url.PathEscape(quotaLocationValue(meta, locs, candidate.Location)))
-				usage, err := fetchUsages(ctx, client, q)
-				if err != nil {
-					findings = append(findings, model.Finding{Severity: "warn", Code: "QUOTA_UNKNOWN", Message: fmt.Sprintf("quota check unavailable for %s: %v", candidate.ResourceType, err), Resource: candidate.Address})
-				} else if exceeded, metric := isQuotaExceeded(usage, meta.QuotaChecks); exceeded {
-					findings = append(findings, model.Finding{Severity: "error", Code: "QUOTA_EXCEEDED", Message: fmt.Sprintf("quota limit reached (%s)", metric), Resource: candidate.Address})
-				}
-			}
+			findings = append(findings, runQuotaCheck(ctx, client, meta, candidate, locs)...)
 		}
 		if progress != nil {
 			progress.Tick(fmt.Sprintf("checked %s", candidate.Address))
@@ -407,6 +405,48 @@ func requiresExplicitLocation(resourceType string) bool {
 	default:
 		return true
 	}
+}
+
+func runQuotaCheck(ctx context.Context, client *AzureClient, meta ResourceMeta, candidate model.Candidate, locations *locationCatalog) []model.Finding {
+	if meta.QuotaPath == "" || candidate.Location == "" {
+		return nil
+	}
+
+	q := fmt.Sprintf(meta.QuotaPath, candidate.SubscriptionID, url.PathEscape(quotaLocationValue(meta, locations, candidate.Location)))
+	usage, err := fetchUsages(ctx, client, q)
+	if err != nil {
+		if isMicrosoftWebQuotaUnsupported(meta, err) {
+			return []model.Finding{{
+				Severity: "warn",
+				Code:     "QUOTA_CHECK_UNSUPPORTED",
+				Message:  fmt.Sprintf("quota check is not supported for %s via Microsoft.Web usages API", candidate.ResourceType),
+				Resource: candidate.Address,
+			}}
+		}
+		return []model.Finding{{
+			Severity: "warn",
+			Code:     "QUOTA_UNKNOWN",
+			Message:  fmt.Sprintf("quota check unavailable for %s: %v", candidate.ResourceType, err),
+			Resource: candidate.Address,
+		}}
+	}
+	if exceeded, metric := isQuotaExceeded(usage, meta.QuotaChecks); exceeded {
+		return []model.Finding{{
+			Severity: "error",
+			Code:     "QUOTA_EXCEEDED",
+			Message:  fmt.Sprintf("quota limit reached (%s)", metric),
+			Resource: candidate.Address,
+		}}
+	}
+	return nil
+}
+
+func isMicrosoftWebQuotaUnsupported(meta ResourceMeta, err error) bool {
+	if !strings.EqualFold(meta.Namespace, "Microsoft.Web") {
+		return false
+	}
+	var apiErr *azureAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest
 }
 
 func runExistenceCheck(ctx context.Context, client *AzureClient, candidate model.Candidate) []model.Finding {
@@ -529,12 +569,14 @@ func isQuotaExceeded(items []usageResponseItem, checks []string) (bool, string) 
 		lookup[strings.ToLower(it.Name.Value)] = it
 	}
 	for _, check := range checks {
-		it, ok := lookup[strings.ToLower(check)]
-		if !ok {
-			continue
-		}
-		if it.Limit > 0 && it.CurrentValue >= it.Limit {
-			return true, it.Name.Value
+		checkKey := strings.ToLower(strings.TrimSpace(check))
+		for metric, it := range lookup {
+			if metric != checkKey && !strings.Contains(metric, checkKey) {
+				continue
+			}
+			if it.Limit > 0 && it.CurrentValue >= it.Limit {
+				return true, it.Name.Value
+			}
 		}
 	}
 	return false, ""
