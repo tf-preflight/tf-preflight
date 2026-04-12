@@ -3,6 +3,7 @@ package discovery
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/tf-preflight/tf-preflight/internal/model"
 )
@@ -45,14 +46,7 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 		return nil, fmt.Errorf("failed to decode plan json: %w", err)
 	}
 
-	hclByAddress := map[string]model.Candidate{}
-	for _, c := range hclContext.Candidates {
-		hclByAddress[c.Address] = c
-	}
-	hclByTypeName := map[string]model.Candidate{}
-	for _, c := range hclContext.Candidates {
-		hclByTypeName[c.ResourceType+"."+c.Name] = c
-	}
+	addressIndex := newAddressIndex(hclContext)
 
 	candidates := []model.Candidate{}
 	seen := map[string]struct{}{}
@@ -83,12 +77,7 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 			base.Warnings = append(base.Warnings, "plan did not resolve location")
 		}
 
-		hcl, ok := hclByAddress[item.Address]
-		if !ok {
-			if alt, found := hclByTypeName[item.Type+"."+item.Name]; found {
-				hcl = alt
-			}
-		}
+		hcl, matchWarning, _ := addressIndex.find(item.Address)
 		if hcl.Address != "" {
 			if base.Location == "" {
 				base.Location = hcl.Location
@@ -109,6 +98,8 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 				base.Address = hcl.Address
 			}
 			base.Source = "merged"
+		} else if matchWarning != "" {
+			base.Warnings = append(base.Warnings, matchWarning)
 		}
 
 		if base.Address == "" {
@@ -141,6 +132,70 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 	}
 
 	return candidates, nil
+}
+
+type addressIndex struct {
+	exact      map[string]model.Candidate
+	normalized map[string][]model.Candidate
+}
+
+func newAddressIndex(hclContext *HCLContext) addressIndex {
+	idx := addressIndex{
+		exact:      map[string]model.Candidate{},
+		normalized: map[string][]model.Candidate{},
+	}
+	if hclContext == nil {
+		return idx
+	}
+
+	for _, c := range hclContext.Candidates {
+		if strings.TrimSpace(c.Address) == "" {
+			continue
+		}
+		idx.exact[c.Address] = c
+		norm := normalizeTerraformAddress(c.Address)
+		idx.normalized[norm] = append(idx.normalized[norm], c)
+	}
+
+	return idx
+}
+
+func (idx addressIndex) find(planAddress string) (model.Candidate, string, bool) {
+	if c, ok := idx.exact[planAddress]; ok {
+		return c, "", true
+	}
+
+	norm := normalizeTerraformAddress(planAddress)
+	matches := idx.normalized[norm]
+	switch len(matches) {
+	case 1:
+		return matches[0], "", true
+	case 0:
+		return model.Candidate{}, fmt.Sprintf("no matching HCL resource found for plan address %q; using plan values only", planAddress), false
+	default:
+		return model.Candidate{}, fmt.Sprintf("multiple HCL resources matched normalized plan address %q; using plan values only", norm), false
+	}
+}
+
+func normalizeTerraformAddress(address string) string {
+	var b strings.Builder
+	depth := 0
+	for _, r := range address {
+		switch r {
+		case '[':
+			depth++
+			continue
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth == 0 {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func classifyActions(actions []string) string {
