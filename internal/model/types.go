@@ -4,21 +4,22 @@ import "time"
 
 // Candidate represents an Azure resource intent discovered from HCL or plan JSON.
 type Candidate struct {
-	Address         string         `json:"address"`
-	ResourceType    string         `json:"resource_type"`
-	Mode            string         `json:"mode,omitempty"`
-	Action          string         `json:"action"`
-	Location        string         `json:"location,omitempty"`
-	SubscriptionID  string         `json:"subscription_id,omitempty"`
-	ResourceGroup   string         `json:"resource_group,omitempty"`
-	VirtualNetwork  string         `json:"virtual_network,omitempty"`
-	Name            string         `json:"name,omitempty"`
-	Sku             string         `json:"sku,omitempty"`
-	Namespace       string         `json:"namespace"`
-	Source          string         `json:"source"`
-	RawRestrictions map[string]any `json:"restrictions,omitempty"`
-	PlanUnknown     bool           `json:"plan_unknown,omitempty"`
-	Warnings        []string       `json:"warnings,omitempty"`
+	Address               string         `json:"address"`
+	ResourceType          string         `json:"resource_type"`
+	Mode                  string         `json:"mode,omitempty"`
+	Action                string         `json:"action"`
+	Location              string         `json:"location,omitempty"`
+	SubscriptionID        string         `json:"subscription_id,omitempty"`
+	ResourceGroup         string         `json:"resource_group,omitempty"`
+	TrafficManagerProfile string         `json:"traffic_manager_profile,omitempty"`
+	VirtualNetwork        string         `json:"virtual_network,omitempty"`
+	Name                  string         `json:"name,omitempty"`
+	Sku                   string         `json:"sku,omitempty"`
+	Namespace             string         `json:"namespace"`
+	Source                string         `json:"source"`
+	RawRestrictions       map[string]any `json:"restrictions,omitempty"`
+	PlanUnknown           bool           `json:"plan_unknown,omitempty"`
+	Warnings              []string       `json:"warnings,omitempty"`
 }
 
 // ModuleImport summarizes a Terraform module block in root configuration.

@@ -359,6 +359,8 @@ func parseResources(content *hcl.BodyContent, ctx *HCLContext) {
 			Attributes: []hcl.AttributeSchema{
 				{Name: "location"},
 				{Name: "name"},
+				{Name: "profile_id"},
+				{Name: "profile_name"},
 				{Name: "resource_group_name"},
 				{Name: "virtual_network_name"},
 				{Name: "sku"},
@@ -388,6 +390,23 @@ func parseResources(content *hcl.BodyContent, ctx *HCLContext) {
 				}
 			}
 		}
+		profileID := ""
+		if v, ok := blockContent.Attributes["profile_id"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					profileID = s
+				}
+			}
+		}
+		profileName := ""
+		if v, ok := blockContent.Attributes["profile_name"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					profileName = s
+				}
+			}
+		}
+		mergeTrafficManagerProfileFields(&cand, profileName, profileID)
 		if v, ok := blockContent.Attributes["virtual_network_name"]; ok {
 			if val, ok := evalExpression(v.Expr, ctx); ok {
 				if s, ok := toString(val); ok {

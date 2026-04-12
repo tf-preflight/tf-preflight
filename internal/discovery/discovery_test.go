@@ -98,3 +98,30 @@ resource "azurerm_subnet" "app" {
 		t.Fatalf("expected virtual network vnet-app, got %s", got)
 	}
 }
+
+func TestParseDirectoryExtractsTrafficManagerEndpointProfileID(t *testing.T) {
+	dir := t.TempDir()
+	content := `
+resource "azurerm_traffic_manager_azure_endpoint" "app" {
+  name       = "tm-endpoint-app"
+  profile_id = "/subscriptions/sub-123/resourceGroups/rg-net/providers/Microsoft.Network/trafficManagerProfiles/tm-profile"
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, err := ParseDirectory(dir)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if len(ctx.Candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(ctx.Candidates))
+	}
+	if got := ctx.Candidates[0].ResourceGroup; got != "rg-net" {
+		t.Fatalf("expected resource group rg-net, got %s", got)
+	}
+	if got := ctx.Candidates[0].TrafficManagerProfile; got != "tm-profile" {
+		t.Fatalf("expected traffic manager profile tm-profile, got %s", got)
+	}
+}

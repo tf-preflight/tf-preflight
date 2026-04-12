@@ -65,6 +65,7 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 		base.ResourceGroup = firstString(item.Change.After, "resource_group_name")
 		base.VirtualNetwork = firstString(item.Change.After, "virtual_network_name")
 		base.Name = firstString(item.Change.After, "name")
+		mergeTrafficManagerProfileFields(&base, firstString(item.Change.After, "profile_name"), firstString(item.Change.After, "profile_id"))
 		if sku := pickNestedString(item.Change.After, "sku", "name"); sku != "" {
 			base.Sku = sku
 		}
@@ -88,6 +89,9 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 			}
 			if base.VirtualNetwork == "" {
 				base.VirtualNetwork = hcl.VirtualNetwork
+			}
+			if base.TrafficManagerProfile == "" {
+				base.TrafficManagerProfile = hcl.TrafficManagerProfile
 			}
 			if base.Name == "" {
 				base.Name = hcl.Name
@@ -131,6 +135,7 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 			base.ResourceGroup = firstString(item.Values, "resource_group_name")
 			base.VirtualNetwork = firstString(item.Values, "virtual_network_name")
 			base.Name = firstString(item.Values, "name")
+			mergeTrafficManagerProfileFields(&base, firstString(item.Values, "profile_name"), firstString(item.Values, "profile_id"))
 			base.Sku = pickNestedString(item.Values, "sku", "name")
 			candidates = append(candidates, base)
 		}

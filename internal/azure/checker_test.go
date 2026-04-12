@@ -14,9 +14,11 @@ import (
 )
 
 func TestIsLocationAvailable(t *testing.T) {
-	locations := map[string]struct{}{
-		"west europe": {},
-		"westeurope":  {},
+	locations := &locationCatalog{
+		known: map[string]struct{}{
+			"west europe": {},
+			"westeurope":  {},
+		},
 	}
 	if !isLocationAvailable(locations, "West Europe") {
 		t.Fatalf("expected location to be available")
@@ -115,6 +117,17 @@ func TestBuildImportID_SupportedResourceTypes(t *testing.T) {
 			want: "/subscriptions/sub-123/resourceGroups/rg-net/providers/Microsoft.Network/trafficManagerProfiles/tm-profile",
 		},
 		{
+			name: "traffic manager azure endpoint",
+			candidate: model.Candidate{
+				ResourceType:          "azurerm_traffic_manager_azure_endpoint",
+				SubscriptionID:        "sub-123",
+				ResourceGroup:         "rg-net",
+				TrafficManagerProfile: "tm-profile",
+				Name:                  "endpoint-app",
+			},
+			want: "/subscriptions/sub-123/resourceGroups/rg-net/providers/Microsoft.Network/trafficManagerProfiles/tm-profile/AzureEndpoints/endpoint-app",
+		},
+		{
 			name: "mssql server",
 			candidate: model.Candidate{
 				ResourceType:   "azurerm_mssql_server",
@@ -142,8 +155,8 @@ func TestBuildImportID_SupportedResourceTypes(t *testing.T) {
 	}
 }
 
-func TestResolveNamespace_SupportsVirtualNetworkAndSubnet(t *testing.T) {
-	for _, resourceType := range []string{"azurerm_virtual_network", "azurerm_subnet"} {
+func TestResolveNamespace_SupportsNetworkResourceCoverage(t *testing.T) {
+	for _, resourceType := range []string{"azurerm_virtual_network", "azurerm_subnet", "azurerm_traffic_manager_azure_endpoint"} {
 		meta, ok := ResolveNamespace(resourceType)
 		if !ok {
 			t.Fatalf("expected %s to be mapped", resourceType)
@@ -347,7 +360,7 @@ func TestRunChecks_SurfacesQuotaLookupFailure(t *testing.T) {
 			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/serverFarms/asp-01"):
 			http.NotFound(w, r)
-		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web/locations/westeurope/usages"):
+		case strings.HasPrefix(r.URL.EscapedPath(), "/subscriptions/sub-123/providers/Microsoft.Web/locations/West%20Europe/usages"):
 			w.WriteHeader(http.StatusInternalServerError)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web"):
 			writeJSON(w, `{"registrationState":"Registered"}`)
@@ -409,7 +422,7 @@ func TestRunChecks_SurfacesIncompleteExistenceMapping(t *testing.T) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
 			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
-		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web/locations/westeurope/usages"):
+		case strings.HasPrefix(r.URL.EscapedPath(), "/subscriptions/sub-123/providers/Microsoft.Web/locations/West%20Europe/usages"):
 			writeJSON(w, `{"value":[{"name":{"value":"sites"},"currentValue":1,"limit":10}]}`)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web"):
 			writeJSON(w, `{"registrationState":"Registered"}`)
@@ -480,6 +493,69 @@ func TestRunChecks_SupportsVirtualNetworkAndSubnet(t *testing.T) {
 	}
 }
 
+func TestRunChecks_SupportsTrafficManagerProfileWithoutLocation(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-net/providers/Microsoft.Network/trafficManagerProfiles/tm-profile"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Network"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:        "azurerm_traffic_manager_profile.tm",
+		ResourceType:   "azurerm_traffic_manager_profile",
+		Mode:           "managed",
+		Action:         "create",
+		SubscriptionID: "sub-123",
+		ResourceGroup:  "rg-net",
+		Name:           "tm-profile",
+	}}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected no degraded findings for supported traffic manager profile checks, got %+v", findings)
+	}
+}
+
+func TestRunChecks_SupportsTrafficManagerAzureEndpoint(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-net/providers/Microsoft.Network/trafficManagerProfiles/tm-profile/AzureEndpoints/endpoint-app"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Network"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{{
+		Address:               "azurerm_traffic_manager_azure_endpoint.endpoint",
+		ResourceType:          "azurerm_traffic_manager_azure_endpoint",
+		Mode:                  "managed",
+		Action:                "create",
+		SubscriptionID:        "sub-123",
+		ResourceGroup:         "rg-net",
+		TrafficManagerProfile: "tm-profile",
+		Name:                  "endpoint-app",
+	}}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected no degraded findings for supported traffic manager endpoint checks, got %+v", findings)
+	}
+}
+
 func TestRunChecks_SurfacesIncompleteSubnetExistenceMapping(t *testing.T) {
 	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -508,6 +584,59 @@ func TestRunChecks_SurfacesIncompleteSubnetExistenceMapping(t *testing.T) {
 	assertFindingCodes(t, findings, []string{"RESOURCE_EXISTS_CHECK_INCOMPLETE"})
 }
 
+func TestRunChecks_AppServiceQuotaUsesCanonicalLocationDisplayName(t *testing.T) {
+	quotaCalls := 0
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/serverFarms/asp-01"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/sites/app-win"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.EscapedPath(), "/subscriptions/sub-123/providers/Microsoft.Web/locations/West%20Europe/usages"):
+			quotaCalls++
+			writeJSON(w, `{"value":[{"name":{"value":"sites"},"currentValue":1,"limit":10}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{
+		{
+			Address:        "azurerm_service_plan.asp",
+			ResourceType:   "azurerm_service_plan",
+			Mode:           "managed",
+			Action:         "create",
+			SubscriptionID: "sub-123",
+			ResourceGroup:  "rg-app",
+			Name:           "asp-01",
+			Location:       "westeurope",
+		},
+		{
+			Address:        "azurerm_windows_web_app.app",
+			ResourceType:   "azurerm_windows_web_app",
+			Mode:           "managed",
+			Action:         "create",
+			SubscriptionID: "sub-123",
+			ResourceGroup:  "rg-app",
+			Name:           "app-win",
+			Location:       "westeurope",
+		},
+	}, client, "sub-123", "error", nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+	if quotaCalls != 2 {
+		t.Fatalf("expected 2 Microsoft.Web quota calls using display location, got %d", quotaCalls)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected no degraded findings for supported App Service quota checks, got %+v", findings)
+	}
+}
+
 func TestRunChecks_MixedResultsRemainDeterministic(t *testing.T) {
 	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -517,7 +646,7 @@ func TestRunChecks_MixedResultsRemainDeterministic(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/serverFarms/asp-01"):
 			http.NotFound(w, r)
-		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Web/locations/westeurope/usages"):
+		case strings.HasPrefix(r.URL.EscapedPath(), "/subscriptions/sub-123/providers/Microsoft.Web/locations/West%20Europe/usages"):
 			w.WriteHeader(http.StatusInternalServerError)
 		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Resources"):
 			writeJSON(w, `{"registrationState":"NotRegistered"}`)

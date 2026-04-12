@@ -23,6 +23,11 @@ type ResourceMeta struct {
 	QuotaChecks []string
 }
 
+type locationCatalog struct {
+	known           map[string]struct{}
+	canonicalByName map[string]string
+}
+
 var resourceMeta = map[string]ResourceMeta{
 	"azurerm_resource_group": {
 		Namespace:  "Microsoft.Resources",
@@ -57,6 +62,11 @@ var resourceMeta = map[string]ResourceMeta{
 		ImportPath:  "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/trafficManagerProfiles/%s",
 		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Network/locations/%s/usages?api-version=2022-01-01",
 		QuotaChecks: []string{"traffic manager profiles"},
+	},
+	"azurerm_traffic_manager_azure_endpoint": {
+		Namespace:  "Microsoft.Network",
+		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/trafficManagerProfiles/%s/AzureEndpoints/%s?api-version=2022-04-01",
+		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/trafficManagerProfiles/%s/AzureEndpoints/%s",
 	},
 	"azurerm_virtual_network": {
 		Namespace:  "Microsoft.Network",
@@ -158,6 +168,17 @@ func buildResourcePath(candidate model.Candidate, escaped bool) (string, []strin
 			return "", missing, true
 		}
 		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.ResourceGroup), value(candidate.VirtualNetwork), value(candidate.Name)), nil, true
+	case "azurerm_traffic_manager_azure_endpoint":
+		missing := missingFields(map[string]string{
+			"subscription_id":         candidate.SubscriptionID,
+			"resource_group":          candidate.ResourceGroup,
+			"traffic_manager_profile": candidate.TrafficManagerProfile,
+			"name":                    candidate.Name,
+		})
+		if len(missing) > 0 {
+			return "", missing, true
+		}
+		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.ResourceGroup), value(candidate.TrafficManagerProfile), value(candidate.Name)), nil, true
 	default:
 		return "", nil, false
 	}
@@ -328,7 +349,7 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 		if candidate.Action == "create" || candidate.Action == "update" || candidate.Action == "replace" {
 			findings = append(findings, runExistenceCheck(ctx, client, candidate)...)
 			if meta.QuotaPath != "" && candidate.Location != "" {
-				q := fmt.Sprintf(meta.QuotaPath, candidate.SubscriptionID, url.PathEscape(strings.ToLower(candidate.Location)))
+				q := fmt.Sprintf(meta.QuotaPath, candidate.SubscriptionID, url.PathEscape(quotaLocationValue(meta, locs, candidate.Location)))
 				usage, err := fetchUsages(ctx, client, q)
 				if err != nil {
 					findings = append(findings, model.Finding{Severity: "warn", Code: "QUOTA_UNKNOWN", Message: fmt.Sprintf("quota check unavailable for %s: %v", candidate.ResourceType, err), Resource: candidate.Address})
@@ -381,7 +402,7 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 
 func requiresExplicitLocation(resourceType string) bool {
 	switch resourceType {
-	case "azurerm_subnet":
+	case "azurerm_subnet", "azurerm_traffic_manager_profile", "azurerm_traffic_manager_azure_endpoint":
 		return false
 	default:
 		return true
@@ -439,23 +460,36 @@ func runExistenceCheck(ctx context.Context, client *AzureClient, candidate model
 	}
 }
 
-func isLocationAvailable(locations map[string]struct{}, location string) bool {
-	_, ok := locations[strings.ToLower(strings.TrimSpace(location))]
+func isLocationAvailable(locations *locationCatalog, location string) bool {
+	if locations == nil {
+		return false
+	}
+	_, ok := locations.known[strings.ToLower(strings.TrimSpace(location))]
 	return ok
 }
 
-func fetchLocations(ctx context.Context, client *AzureClient, subscription string) (map[string]struct{}, error) {
+func fetchLocations(ctx context.Context, client *AzureClient, subscription string) (*locationCatalog, error) {
 	path := fmt.Sprintf("/subscriptions/%s/locations?api-version=2020-01-01", subscription)
 	resp := &locationResponse{}
 	if err := client.callJSON(ctx, "GET", path, resp); err != nil {
 		return nil, err
 	}
 	known := map[string]struct{}{}
+	canonical := map[string]string{}
 	for _, item := range resp.Value {
-		known[strings.ToLower(item.Name)] = struct{}{}
-		known[strings.ToLower(item.DisplayName)] = struct{}{}
+		nameKey := strings.ToLower(strings.TrimSpace(item.Name))
+		displayKey := strings.ToLower(strings.TrimSpace(item.DisplayName))
+		known[nameKey] = struct{}{}
+		known[displayKey] = struct{}{}
+		if strings.TrimSpace(item.DisplayName) != "" {
+			canonical[nameKey] = item.DisplayName
+			canonical[displayKey] = item.DisplayName
+		}
 	}
-	return known, nil
+	return &locationCatalog{
+		known:           known,
+		canonicalByName: canonical,
+	}, nil
 }
 
 func isProviderRegistered(ctx context.Context, client *AzureClient, subscription, namespace string) (bool, error) {
@@ -504,6 +538,20 @@ func isQuotaExceeded(items []usageResponseItem, checks []string) (bool, string) 
 		}
 	}
 	return false, ""
+}
+
+func quotaLocationValue(meta ResourceMeta, locations *locationCatalog, location string) string {
+	trimmed := strings.TrimSpace(location)
+	if meta.Namespace == "Microsoft.Web" {
+		key := strings.ToLower(trimmed)
+		if locations != nil {
+			if display := strings.TrimSpace(locations.canonicalByName[key]); display != "" {
+				return display
+			}
+		}
+		return trimmed
+	}
+	return strings.ToLower(trimmed)
 }
 
 func ResolveSubscriptionFromCLI() (string, error) {

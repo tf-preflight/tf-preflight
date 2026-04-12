@@ -282,6 +282,37 @@ func TestCandidatesFromPlanMergesSubnetVirtualNetworkName(t *testing.T) {
 	}
 }
 
+func TestCandidatesFromPlanParsesTrafficManagerEndpointProfileID(t *testing.T) {
+	cands, err := CandidatesFromPlan(planBlob(t, []map[string]any{
+		{
+			"address": "azurerm_traffic_manager_azure_endpoint.app",
+			"type":    "azurerm_traffic_manager_azure_endpoint",
+			"name":    "app",
+			"mode":    "managed",
+			"change": map[string]any{
+				"actions": []string{"create"},
+				"after": map[string]any{
+					"name":       "tm-endpoint-app",
+					"profile_id": "/subscriptions/sub-123/resourceGroups/rg-net/providers/Microsoft.Network/trafficManagerProfiles/tm-profile",
+				},
+				"after_unknown": map[string]any{},
+			},
+		},
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(cands))
+	}
+	if got := cands[0].ResourceGroup; got != "rg-net" {
+		t.Fatalf("expected parsed resource group rg-net, got %s", got)
+	}
+	if got := cands[0].TrafficManagerProfile; got != "tm-profile" {
+		t.Fatalf("expected parsed traffic manager profile tm-profile, got %s", got)
+	}
+}
+
 func planBlob(t *testing.T, changes []map[string]any) []byte {
 	t.Helper()
 
