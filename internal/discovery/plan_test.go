@@ -420,6 +420,141 @@ resource "azurerm_key_vault_secret" "secret" {
 	}
 }
 
+func TestCandidatesFromPlanParsesFrontDoorParentMetadataFromIDs(t *testing.T) {
+	cands, err := CandidatesFromPlan(planBlob(t, []map[string]any{
+		{
+			"address": "azurerm_cdn_frontdoor_origin.origin",
+			"type":    "azurerm_cdn_frontdoor_origin",
+			"name":    "origin",
+			"mode":    "managed",
+			"change": map[string]any{
+				"actions": []string{"create"},
+				"after": map[string]any{
+					"name":                          "fd-origin",
+					"cdn_frontdoor_origin_group_id": "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile/originGroups/fd-group",
+				},
+				"after_unknown": map[string]any{},
+			},
+		},
+		{
+			"address": "azurerm_cdn_frontdoor_route.route",
+			"type":    "azurerm_cdn_frontdoor_route",
+			"name":    "route",
+			"mode":    "managed",
+			"change": map[string]any{
+				"actions": []string{"create"},
+				"after": map[string]any{
+					"name":                          "fd-route",
+					"cdn_frontdoor_endpoint_id":     "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile/afdEndpoints/fd-endpoint",
+					"cdn_frontdoor_origin_group_id": "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile/originGroups/fd-group",
+				},
+				"after_unknown": map[string]any{},
+			},
+		},
+	}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(cands))
+	}
+	if got := cands[0].ResourceGroup; got != "rg-edge" {
+		t.Fatalf("expected origin resource group rg-edge, got %s", got)
+	}
+	if got := cands[0].FrontDoorProfile; got != "fd-profile" {
+		t.Fatalf("expected origin profile fd-profile, got %s", got)
+	}
+	if got := cands[0].FrontDoorOriginGroup; got != "fd-group" {
+		t.Fatalf("expected origin group fd-group, got %s", got)
+	}
+	if got := cands[1].FrontDoorProfile; got != "fd-profile" {
+		t.Fatalf("expected route profile fd-profile, got %s", got)
+	}
+	if got := cands[1].FrontDoorEndpoint; got != "fd-endpoint" {
+		t.Fatalf("expected route endpoint fd-endpoint, got %s", got)
+	}
+	if got := cands[1].FrontDoorOriginGroup; got != "fd-group" {
+		t.Fatalf("expected route origin group fd-group, got %s", got)
+	}
+}
+
+func TestCandidatesFromPlanMergesFrontDoorRouteMetadataFromParsedHCL(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`
+provider "azurerm" {
+  subscription_id = "sub-123"
+  features {}
+}
+
+resource "azurerm_cdn_frontdoor_profile" "fd" {
+  name                = "fd-profile"
+  resource_group_name = "rg-edge"
+  sku_name            = "Standard_AzureFrontDoor"
+}
+
+resource "azurerm_cdn_frontdoor_endpoint" "endpoint" {
+  name                     = "fd-endpoint"
+  cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.fd.id
+}
+
+resource "azurerm_cdn_frontdoor_origin_group" "group" {
+  name                     = "fd-group"
+  cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.fd.id
+}
+
+resource "azurerm_cdn_frontdoor_route" "route" {
+  name                          = "fd-route"
+  cdn_frontdoor_endpoint_id     = azurerm_cdn_frontdoor_endpoint.endpoint.id
+  cdn_frontdoor_origin_group_id = azurerm_cdn_frontdoor_origin_group.group.id
+  supported_protocols           = ["Http", "Https"]
+  patterns_to_match             = ["/*"]
+  forwarding_protocol           = "MatchRequest"
+  link_to_default_domain        = true
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hcl, err := ParseDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cands, err := CandidatesFromPlan(planBlob(t, []map[string]any{
+		{
+			"address": "azurerm_cdn_frontdoor_route.route",
+			"type":    "azurerm_cdn_frontdoor_route",
+			"name":    "route",
+			"mode":    "managed",
+			"change": map[string]any{
+				"actions": []string{"create"},
+				"after": map[string]any{
+					"name": "fd-route",
+				},
+				"after_unknown": map[string]any{},
+			},
+		},
+	}), hcl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cands[0].Source; got != "merged" {
+		t.Fatalf("expected merged source, got %s", got)
+	}
+	if got := cands[0].ResourceGroup; got != "rg-edge" {
+		t.Fatalf("expected merged route resource group rg-edge, got %s", got)
+	}
+	if got := cands[0].FrontDoorProfile; got != "fd-profile" {
+		t.Fatalf("expected merged route profile fd-profile, got %s", got)
+	}
+	if got := cands[0].FrontDoorEndpoint; got != "fd-endpoint" {
+		t.Fatalf("expected merged route endpoint fd-endpoint, got %s", got)
+	}
+	if got := cands[0].FrontDoorOriginGroup; got != "fd-group" {
+		t.Fatalf("expected merged route origin group fd-group, got %s", got)
+	}
+}
+
 func TestCandidatesFromPlanMergesForEachModuleInstanceFromParsedHCL(t *testing.T) {
 	dir := t.TempDir()
 	moduleDir := filepath.Join(dir, "modules", "web")

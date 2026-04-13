@@ -191,3 +191,94 @@ resource "azurerm_key_vault_secret" "secret" {
 		t.Fatalf("expected resolved key vault ID, got %s", got)
 	}
 }
+
+func TestParseDirectoryExtractsFrontDoorReferences(t *testing.T) {
+	dir := t.TempDir()
+	content := `
+provider "azurerm" {
+  subscription_id = "sub-123"
+  features {}
+}
+
+resource "azurerm_cdn_frontdoor_profile" "fd" {
+  name                = "fd-profile"
+  resource_group_name = "rg-edge"
+  sku_name            = "Standard_AzureFrontDoor"
+}
+
+resource "azurerm_cdn_frontdoor_endpoint" "endpoint" {
+  name                     = "fd-endpoint"
+  cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.fd.id
+}
+
+resource "azurerm_cdn_frontdoor_origin_group" "group" {
+  name                     = "fd-origin-group"
+  cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.fd.id
+}
+
+resource "azurerm_cdn_frontdoor_origin" "origin" {
+  name                          = "fd-origin"
+  cdn_frontdoor_origin_group_id = azurerm_cdn_frontdoor_origin_group.group.id
+}
+
+resource "azurerm_cdn_frontdoor_route" "route" {
+  name                          = "fd-route"
+  cdn_frontdoor_endpoint_id     = azurerm_cdn_frontdoor_endpoint.endpoint.id
+  cdn_frontdoor_origin_group_id = azurerm_cdn_frontdoor_origin_group.group.id
+  supported_protocols           = ["Http", "Https"]
+  patterns_to_match             = ["/*"]
+  forwarding_protocol           = "MatchRequest"
+  link_to_default_domain        = true
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, err := ParseDirectory(dir)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	endpoint, ok := ctx.CandidateMap["azurerm_cdn_frontdoor_endpoint.endpoint"]
+	if !ok {
+		t.Fatalf("expected front door endpoint candidate, got %#v", ctx.CandidateMap)
+	}
+	if got := endpoint.ResourceGroup; got != "rg-edge" {
+		t.Fatalf("expected endpoint resource group rg-edge, got %s", got)
+	}
+	if got := endpoint.FrontDoorProfile; got != "fd-profile" {
+		t.Fatalf("expected endpoint profile fd-profile, got %s", got)
+	}
+
+	origin, ok := ctx.CandidateMap["azurerm_cdn_frontdoor_origin.origin"]
+	if !ok {
+		t.Fatalf("expected front door origin candidate, got %#v", ctx.CandidateMap)
+	}
+	if got := origin.ResourceGroup; got != "rg-edge" {
+		t.Fatalf("expected origin resource group rg-edge, got %s", got)
+	}
+	if got := origin.FrontDoorProfile; got != "fd-profile" {
+		t.Fatalf("expected origin profile fd-profile, got %s", got)
+	}
+	if got := origin.FrontDoorOriginGroup; got != "fd-origin-group" {
+		t.Fatalf("expected origin group fd-origin-group, got %s", got)
+	}
+
+	route, ok := ctx.CandidateMap["azurerm_cdn_frontdoor_route.route"]
+	if !ok {
+		t.Fatalf("expected front door route candidate, got %#v", ctx.CandidateMap)
+	}
+	if got := route.ResourceGroup; got != "rg-edge" {
+		t.Fatalf("expected route resource group rg-edge, got %s", got)
+	}
+	if got := route.FrontDoorProfile; got != "fd-profile" {
+		t.Fatalf("expected route profile fd-profile, got %s", got)
+	}
+	if got := route.FrontDoorEndpoint; got != "fd-endpoint" {
+		t.Fatalf("expected route endpoint fd-endpoint, got %s", got)
+	}
+	if got := route.FrontDoorOriginGroup; got != "fd-origin-group" {
+		t.Fatalf("expected route origin group fd-origin-group, got %s", got)
+	}
+}

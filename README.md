@@ -120,8 +120,14 @@ Current v1 behavior:
 - supports import recommendations for:
   - `azurerm_resource_group`
   - `azurerm_service_plan`
+  - `azurerm_storage_account`
   - `azurerm_windows_web_app`
   - `azurerm_linux_web_app`
+  - `azurerm_cdn_frontdoor_profile`
+  - `azurerm_cdn_frontdoor_endpoint`
+  - `azurerm_cdn_frontdoor_origin_group`
+  - `azurerm_cdn_frontdoor_origin`
+  - `azurerm_cdn_frontdoor_route`
   - `azurerm_traffic_manager_profile`
   - `azurerm_mssql_server`
 - reports `IMPORT_REQUIRED` when a matching Azure resource already exists
@@ -142,6 +148,7 @@ Recommended workflow:
 3. Quota checks from usages endpoints when mappings are available
 4. Safe existence probes for planned names on create/update
    - backend probe failures are surfaced explicitly as errors
+   - includes direct support for `azurerm_storage_account` and Azure Front Door profile/endpoint/origin-group/origin/route resources
 5. Azure SQL capability checks for `Microsoft.Sql`
    - validates region provisioning status for SQL server/database deployment
    - validates SQL database `sku_name` availability in the effective region before apply

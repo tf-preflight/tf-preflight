@@ -67,6 +67,9 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 		base.KeyVaultID = firstString(item.Change.After, "key_vault_id")
 		base.VirtualNetwork = firstString(item.Change.After, "virtual_network_name")
 		base.Name = firstString(item.Change.After, "name")
+		mergeFrontDoorProfileFields(&base, firstString(item.Change.After, "cdn_frontdoor_profile_id"))
+		mergeFrontDoorEndpointFields(&base, firstString(item.Change.After, "cdn_frontdoor_endpoint_id"))
+		mergeFrontDoorOriginGroupFields(&base, firstString(item.Change.After, "cdn_frontdoor_origin_group_id"))
 		mergeTrafficManagerProfileFields(&base, firstString(item.Change.After, "profile_name"), firstString(item.Change.After, "profile_id"))
 		if sku := pickNestedString(item.Change.After, "sku", "name"); sku != "" {
 			base.Sku = sku
@@ -100,6 +103,15 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 			}
 			if base.VirtualNetwork == "" {
 				base.VirtualNetwork = hcl.VirtualNetwork
+			}
+			if base.FrontDoorProfile == "" {
+				base.FrontDoorProfile = hcl.FrontDoorProfile
+			}
+			if base.FrontDoorEndpoint == "" {
+				base.FrontDoorEndpoint = hcl.FrontDoorEndpoint
+			}
+			if base.FrontDoorOriginGroup == "" {
+				base.FrontDoorOriginGroup = hcl.FrontDoorOriginGroup
 			}
 			if base.TrafficManagerProfile == "" {
 				base.TrafficManagerProfile = hcl.TrafficManagerProfile
@@ -148,6 +160,9 @@ func CandidatesFromPlan(data []byte, hclContext *HCLContext) ([]model.Candidate,
 			base.KeyVaultID = firstString(item.Values, "key_vault_id")
 			base.VirtualNetwork = firstString(item.Values, "virtual_network_name")
 			base.Name = firstString(item.Values, "name")
+			mergeFrontDoorProfileFields(&base, firstString(item.Values, "cdn_frontdoor_profile_id"))
+			mergeFrontDoorEndpointFields(&base, firstString(item.Values, "cdn_frontdoor_endpoint_id"))
+			mergeFrontDoorOriginGroupFields(&base, firstString(item.Values, "cdn_frontdoor_origin_group_id"))
 			mergeTrafficManagerProfileFields(&base, firstString(item.Values, "profile_name"), firstString(item.Values, "profile_id"))
 			base.Sku = pickNestedString(item.Values, "sku", "name")
 			if base.Sku == "" {

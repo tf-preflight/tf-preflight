@@ -12,6 +12,9 @@ type Candidate struct {
 	SubscriptionID        string         `json:"subscription_id,omitempty"`
 	ResourceGroup         string         `json:"resource_group,omitempty"`
 	TrafficManagerProfile string         `json:"traffic_manager_profile,omitempty"`
+	FrontDoorProfile      string         `json:"frontdoor_profile,omitempty"`
+	FrontDoorEndpoint     string         `json:"frontdoor_endpoint,omitempty"`
+	FrontDoorOriginGroup  string         `json:"frontdoor_origin_group,omitempty"`
 	VirtualNetwork        string         `json:"virtual_network,omitempty"`
 	ServerID              string         `json:"server_id,omitempty"`
 	KeyVaultID            string         `json:"key_vault_id,omitempty"`

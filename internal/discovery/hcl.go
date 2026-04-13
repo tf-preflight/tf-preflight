@@ -471,6 +471,9 @@ func enrichResourceCandidate(b *hcl.Block, ctx *HCLContext) {
 
 	blockContent, _, _ := b.Body.PartialContent(&hcl.BodySchema{
 		Attributes: []hcl.AttributeSchema{
+			{Name: "cdn_frontdoor_endpoint_id"},
+			{Name: "cdn_frontdoor_origin_group_id"},
+			{Name: "cdn_frontdoor_profile_id"},
 			{Name: "key_vault_id"},
 			{Name: "location"},
 			{Name: "name"},
@@ -516,6 +519,27 @@ func enrichResourceCandidate(b *hcl.Block, ctx *HCLContext) {
 			if val, ok := evalExpression(v.Expr, ctx); ok {
 				if s, ok := toString(val); ok {
 					cand.ServerID = s
+				}
+			}
+		}
+		if v, ok := blockContent.Attributes["cdn_frontdoor_profile_id"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					mergeFrontDoorProfileFields(&cand, s)
+				}
+			}
+		}
+		if v, ok := blockContent.Attributes["cdn_frontdoor_endpoint_id"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					mergeFrontDoorEndpointFields(&cand, s)
+				}
+			}
+		}
+		if v, ok := blockContent.Attributes["cdn_frontdoor_origin_group_id"]; ok {
+			if val, ok := evalExpression(v.Expr, ctx); ok {
+				if s, ok := toString(val); ok {
+					mergeFrontDoorOriginGroupFields(&cand, s)
 				}
 			}
 		}
@@ -1047,6 +1071,12 @@ func candidateTraversalValue(candidate model.Candidate, attrs []string) (any, bo
 		value = candidate.VirtualNetwork
 	case "traffic_manager_profile", "profile_name":
 		value = candidate.TrafficManagerProfile
+	case "frontdoor_profile":
+		value = candidate.FrontDoorProfile
+	case "frontdoor_endpoint":
+		value = candidate.FrontDoorEndpoint
+	case "frontdoor_origin_group":
+		value = candidate.FrontDoorOriginGroup
 	case "id":
 		id, ok := buildCandidateResourceID(candidate)
 		if !ok {

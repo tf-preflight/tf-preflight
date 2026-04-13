@@ -28,6 +28,8 @@ type ResourceMeta struct {
 const (
 	ResourceManagerAudience      = "https://management.azure.com"
 	KeyVaultAudience             = "https://vault.azure.net"
+	storageAPIVersion            = "2025-06-01"
+	frontDoorAPIVersion          = "2025-04-15"
 	sqlCapabilitiesAPIVersion    = "2025-01-01"
 	sqlServerAPIVersion          = "2023-02-01"
 	keyVaultSecretAPIVersion     = "7.4"
@@ -55,6 +57,11 @@ var resourceMeta = map[string]ResourceMeta{
 		QuotaPath:   "/subscriptions/%s/providers/Microsoft.Web/locations/%s/usages?api-version=2025-03-01",
 		QuotaChecks: []string{"cores usage"},
 	},
+	"azurerm_storage_account": {
+		Namespace:  "Microsoft.Storage",
+		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Storage/storageAccounts/%s?api-version=" + storageAPIVersion,
+		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Storage/storageAccounts/%s",
+	},
 	"azurerm_windows_web_app": {
 		Namespace:  "Microsoft.Web",
 		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s?api-version=2023-01-01",
@@ -64,6 +71,31 @@ var resourceMeta = map[string]ResourceMeta{
 		Namespace:  "Microsoft.Web",
 		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s?api-version=2023-01-01",
 		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Web/sites/%s",
+	},
+	"azurerm_cdn_frontdoor_profile": {
+		Namespace:  "Microsoft.Cdn",
+		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Cdn/profiles/%s?api-version=" + frontDoorAPIVersion,
+		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Cdn/profiles/%s",
+	},
+	"azurerm_cdn_frontdoor_endpoint": {
+		Namespace:  "Microsoft.Cdn",
+		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Cdn/profiles/%s/afdEndpoints/%s?api-version=" + frontDoorAPIVersion,
+		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Cdn/profiles/%s/afdEndpoints/%s",
+	},
+	"azurerm_cdn_frontdoor_origin_group": {
+		Namespace:  "Microsoft.Cdn",
+		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Cdn/profiles/%s/originGroups/%s?api-version=" + frontDoorAPIVersion,
+		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Cdn/profiles/%s/originGroups/%s",
+	},
+	"azurerm_cdn_frontdoor_origin": {
+		Namespace:  "Microsoft.Cdn",
+		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Cdn/profiles/%s/originGroups/%s/origins/%s?api-version=" + frontDoorAPIVersion,
+		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Cdn/profiles/%s/originGroups/%s/origins/%s",
+	},
+	"azurerm_cdn_frontdoor_route": {
+		Namespace:  "Microsoft.Cdn",
+		ExistsPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Cdn/profiles/%s/afdEndpoints/%s/routes/%s?api-version=" + frontDoorAPIVersion,
+		ImportPath: "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Cdn/profiles/%s/afdEndpoints/%s/routes/%s",
 	},
 	"azurerm_traffic_manager_profile": {
 		Namespace:   "Microsoft.Network",
@@ -155,8 +187,10 @@ func buildResourcePath(candidate model.Candidate, escaped bool) (string, []strin
 		}
 		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.Name)), nil, true
 	case "azurerm_service_plan",
+		"azurerm_storage_account",
 		"azurerm_windows_web_app",
 		"azurerm_linux_web_app",
+		"azurerm_cdn_frontdoor_profile",
 		"azurerm_virtual_network",
 		"azurerm_traffic_manager_profile",
 		"azurerm_mssql_server":
@@ -169,6 +203,52 @@ func buildResourcePath(candidate model.Candidate, escaped bool) (string, []strin
 			return "", missing, true
 		}
 		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.ResourceGroup), value(candidate.Name)), nil, true
+	case "azurerm_cdn_frontdoor_endpoint":
+		missing := missingFields(map[string]string{
+			"subscription_id":   candidate.SubscriptionID,
+			"resource_group":    candidate.ResourceGroup,
+			"frontdoor_profile": candidate.FrontDoorProfile,
+			"name":              candidate.Name,
+		})
+		if len(missing) > 0 {
+			return "", missing, true
+		}
+		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.ResourceGroup), value(candidate.FrontDoorProfile), value(candidate.Name)), nil, true
+	case "azurerm_cdn_frontdoor_origin_group":
+		missing := missingFields(map[string]string{
+			"subscription_id":   candidate.SubscriptionID,
+			"resource_group":    candidate.ResourceGroup,
+			"frontdoor_profile": candidate.FrontDoorProfile,
+			"name":              candidate.Name,
+		})
+		if len(missing) > 0 {
+			return "", missing, true
+		}
+		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.ResourceGroup), value(candidate.FrontDoorProfile), value(candidate.Name)), nil, true
+	case "azurerm_cdn_frontdoor_origin":
+		missing := missingFields(map[string]string{
+			"subscription_id":        candidate.SubscriptionID,
+			"resource_group":         candidate.ResourceGroup,
+			"frontdoor_profile":      candidate.FrontDoorProfile,
+			"frontdoor_origin_group": candidate.FrontDoorOriginGroup,
+			"name":                   candidate.Name,
+		})
+		if len(missing) > 0 {
+			return "", missing, true
+		}
+		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.ResourceGroup), value(candidate.FrontDoorProfile), value(candidate.FrontDoorOriginGroup), value(candidate.Name)), nil, true
+	case "azurerm_cdn_frontdoor_route":
+		missing := missingFields(map[string]string{
+			"subscription_id":    candidate.SubscriptionID,
+			"resource_group":     candidate.ResourceGroup,
+			"frontdoor_profile":  candidate.FrontDoorProfile,
+			"frontdoor_endpoint": candidate.FrontDoorEndpoint,
+			"name":               candidate.Name,
+		})
+		if len(missing) > 0 {
+			return "", missing, true
+		}
+		return fmt.Sprintf(template, candidate.SubscriptionID, value(candidate.ResourceGroup), value(candidate.FrontDoorProfile), value(candidate.FrontDoorEndpoint), value(candidate.Name)), nil, true
 	case "azurerm_subnet":
 		missing := missingFields(map[string]string{
 			"subscription_id": candidate.SubscriptionID,
@@ -481,6 +561,11 @@ func RunChecks(ctx context.Context, candidates []model.Candidate, client *AzureC
 func requiresExplicitLocation(resourceType string) bool {
 	switch resourceType {
 	case "azurerm_subnet",
+		"azurerm_cdn_frontdoor_profile",
+		"azurerm_cdn_frontdoor_endpoint",
+		"azurerm_cdn_frontdoor_origin_group",
+		"azurerm_cdn_frontdoor_origin",
+		"azurerm_cdn_frontdoor_route",
 		"azurerm_traffic_manager_profile",
 		"azurerm_traffic_manager_azure_endpoint",
 		"azurerm_mssql_database",

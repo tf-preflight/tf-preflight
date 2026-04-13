@@ -82,6 +82,16 @@ func TestBuildImportID_SupportedResourceTypes(t *testing.T) {
 			want: "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/serverFarms/asp-01",
 		},
 		{
+			name: "storage account",
+			candidate: model.Candidate{
+				ResourceType:   "azurerm_storage_account",
+				SubscriptionID: "sub-123",
+				ResourceGroup:  "rg-app",
+				Name:           "stapp01",
+			},
+			want: "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Storage/storageAccounts/stapp01",
+		},
+		{
 			name: "windows web app",
 			candidate: model.Candidate{
 				ResourceType:   "azurerm_windows_web_app",
@@ -100,6 +110,62 @@ func TestBuildImportID_SupportedResourceTypes(t *testing.T) {
 				Name:           "app-linux",
 			},
 			want: "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Web/sites/app-linux",
+		},
+		{
+			name: "front door profile",
+			candidate: model.Candidate{
+				ResourceType:   "azurerm_cdn_frontdoor_profile",
+				SubscriptionID: "sub-123",
+				ResourceGroup:  "rg-edge",
+				Name:           "fd-profile",
+			},
+			want: "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile",
+		},
+		{
+			name: "front door endpoint",
+			candidate: model.Candidate{
+				ResourceType:     "azurerm_cdn_frontdoor_endpoint",
+				SubscriptionID:   "sub-123",
+				ResourceGroup:    "rg-edge",
+				FrontDoorProfile: "fd-profile",
+				Name:             "fd-endpoint",
+			},
+			want: "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile/afdEndpoints/fd-endpoint",
+		},
+		{
+			name: "front door origin group",
+			candidate: model.Candidate{
+				ResourceType:     "azurerm_cdn_frontdoor_origin_group",
+				SubscriptionID:   "sub-123",
+				ResourceGroup:    "rg-edge",
+				FrontDoorProfile: "fd-profile",
+				Name:             "fd-group",
+			},
+			want: "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile/originGroups/fd-group",
+		},
+		{
+			name: "front door origin",
+			candidate: model.Candidate{
+				ResourceType:         "azurerm_cdn_frontdoor_origin",
+				SubscriptionID:       "sub-123",
+				ResourceGroup:        "rg-edge",
+				FrontDoorProfile:     "fd-profile",
+				FrontDoorOriginGroup: "fd-group",
+				Name:                 "fd-origin",
+			},
+			want: "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile/originGroups/fd-group/origins/fd-origin",
+		},
+		{
+			name: "front door route",
+			candidate: model.Candidate{
+				ResourceType:      "azurerm_cdn_frontdoor_route",
+				SubscriptionID:    "sub-123",
+				ResourceGroup:     "rg-edge",
+				FrontDoorProfile:  "fd-profile",
+				FrontDoorEndpoint: "fd-endpoint",
+				Name:              "fd-route",
+			},
+			want: "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile/afdEndpoints/fd-endpoint/routes/fd-route",
 		},
 		{
 			name: "virtual network",
@@ -171,14 +237,22 @@ func TestBuildImportID_SupportedResourceTypes(t *testing.T) {
 	}
 }
 
-func TestResolveNamespace_SupportsNetworkResourceCoverage(t *testing.T) {
-	for _, resourceType := range []string{"azurerm_virtual_network", "azurerm_subnet", "azurerm_traffic_manager_azure_endpoint"} {
+func TestResolveNamespace_SupportsExpandedAzureResourceCoverage(t *testing.T) {
+	tests := map[string]string{
+		"azurerm_storage_account":                "Microsoft.Storage",
+		"azurerm_cdn_frontdoor_profile":          "Microsoft.Cdn",
+		"azurerm_cdn_frontdoor_route":            "Microsoft.Cdn",
+		"azurerm_virtual_network":                "Microsoft.Network",
+		"azurerm_subnet":                         "Microsoft.Network",
+		"azurerm_traffic_manager_azure_endpoint": "Microsoft.Network",
+	}
+	for resourceType, namespace := range tests {
 		meta, ok := ResolveNamespace(resourceType)
 		if !ok {
 			t.Fatalf("expected %s to be mapped", resourceType)
 		}
-		if meta.Namespace != "Microsoft.Network" {
-			t.Fatalf("expected %s namespace to be Microsoft.Network, got %s", resourceType, meta.Namespace)
+		if meta.Namespace != namespace {
+			t.Fatalf("expected %s namespace to be %s, got %s", resourceType, namespace, meta.Namespace)
 		}
 	}
 }
@@ -571,6 +645,103 @@ func TestRunChecks_SupportsTrafficManagerAzureEndpoint(t *testing.T) {
 	}
 	if len(findings) != 0 {
 		t.Fatalf("expected no degraded findings for supported traffic manager endpoint checks, got %+v", findings)
+	}
+}
+
+func TestRunChecks_SupportsStorageAndFrontDoorCoverage(t *testing.T) {
+	client := newAzureTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/locations"):
+			writeJSON(w, `{"value":[{"name":"westeurope","displayName":"West Europe"}]}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-app/providers/Microsoft.Storage/storageAccounts/stapp01"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile/afdEndpoints/fd-endpoint/routes/fd-route"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile/originGroups/fd-group/origins/fd-origin"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile/originGroups/fd-group"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile/afdEndpoints/fd-endpoint"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/resourceGroups/rg-edge/providers/Microsoft.Cdn/profiles/fd-profile"):
+			http.NotFound(w, r)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Storage"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		case strings.HasPrefix(r.URL.Path, "/subscriptions/sub-123/providers/Microsoft.Cdn"):
+			writeJSON(w, `{"registrationState":"Registered"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	findings, err := RunChecks(context.Background(), []model.Candidate{
+		{
+			Address:        "azurerm_storage_account.storage",
+			ResourceType:   "azurerm_storage_account",
+			Mode:           "managed",
+			Action:         "create",
+			SubscriptionID: "sub-123",
+			ResourceGroup:  "rg-app",
+			Name:           "stapp01",
+			Location:       "westeurope",
+		},
+		{
+			Address:        "azurerm_cdn_frontdoor_profile.fd",
+			ResourceType:   "azurerm_cdn_frontdoor_profile",
+			Mode:           "managed",
+			Action:         "create",
+			SubscriptionID: "sub-123",
+			ResourceGroup:  "rg-edge",
+			Name:           "fd-profile",
+		},
+		{
+			Address:          "azurerm_cdn_frontdoor_endpoint.endpoint",
+			ResourceType:     "azurerm_cdn_frontdoor_endpoint",
+			Mode:             "managed",
+			Action:           "create",
+			SubscriptionID:   "sub-123",
+			ResourceGroup:    "rg-edge",
+			FrontDoorProfile: "fd-profile",
+			Name:             "fd-endpoint",
+		},
+		{
+			Address:          "azurerm_cdn_frontdoor_origin_group.group",
+			ResourceType:     "azurerm_cdn_frontdoor_origin_group",
+			Mode:             "managed",
+			Action:           "create",
+			SubscriptionID:   "sub-123",
+			ResourceGroup:    "rg-edge",
+			FrontDoorProfile: "fd-profile",
+			Name:             "fd-group",
+		},
+		{
+			Address:              "azurerm_cdn_frontdoor_origin.origin",
+			ResourceType:         "azurerm_cdn_frontdoor_origin",
+			Mode:                 "managed",
+			Action:               "create",
+			SubscriptionID:       "sub-123",
+			ResourceGroup:        "rg-edge",
+			FrontDoorProfile:     "fd-profile",
+			FrontDoorOriginGroup: "fd-group",
+			Name:                 "fd-origin",
+		},
+		{
+			Address:           "azurerm_cdn_frontdoor_route.route",
+			ResourceType:      "azurerm_cdn_frontdoor_route",
+			Mode:              "managed",
+			Action:            "create",
+			SubscriptionID:    "sub-123",
+			ResourceGroup:     "rg-edge",
+			FrontDoorProfile:  "fd-profile",
+			FrontDoorEndpoint: "fd-endpoint",
+			Name:              "fd-route",
+		},
+	}, client, "sub-123", "error", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected RunChecks error: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected no degraded findings for storage/front door checks, got %+v", findings)
 	}
 }
 
